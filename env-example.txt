@@ -1,2 +1,2 @@
-SRC_DIR = "/media/models/TheDrummer/Behemoth-R1-123B-v2/main/"
-DST_DIR = "/media/models/TheHouseOfTheDude/Behemoth-R1-123B-v2_Compressed-Tensors/W4A16"
+SRC_DIR = "DIRECTORY OF SOURCE MODEL"
+DST_DIR = "~/AuthorName/MODEL-NAME_Compressed-Tensors/QUANT-SCHEME-USED"
