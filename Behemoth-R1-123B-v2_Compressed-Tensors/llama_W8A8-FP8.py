@@ -22,10 +22,22 @@ def require_env(name: str) -> str:
 # =========================
 # Model
 # =========================
-MODEL_ID = require_env("SRC_DIR")
+MODEL_ID = require_env("SRC_DIR").rstrip("/")  # Remove trailing slash if present
+
+# Verify the model directory exists
+if not os.path.isdir(MODEL_ID):
+    raise RuntimeError(f"Model directory does not exist: {MODEL_ID}")
+
+# Convert to absolute path to ensure it's recognized as a local directory
+model_path = str(Path(MODEL_ID).resolve())
+print(f"Loading model from: {model_path}")
 
 # Load tokenizer (model will be loaded layer-by-layer by oneshot)
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(
+    model_path, 
+    trust_remote_code=True,
+    local_files_only=True  # Use local files, don't try to download from HF Hub
+)
 
 # =========================
 # Configure the quantization algorithm and scheme.
@@ -40,13 +52,14 @@ recipe = QuantizationModifier(
 # =========================
 # Apply quantization with sequential onloading.
 # =========================
-# By passing MODEL_ID as a string (instead of a loaded model), oneshot() will
+# By passing model_path as a string (instead of a loaded model), oneshot() will
 # load layers one at a time from disk -> GPU -> process -> store in system RAM.
 # This prevents VRAM exhaustion for large models like Behemoth-R1-123B-v2.
 model = oneshot(
-    model=MODEL_ID,
+    model=model_path,
     recipe=recipe,
     trust_remote_code_model=True,
+    cache_dir=None,  # Don't use HF cache since we're loading locally
 )
 
 
@@ -54,7 +67,7 @@ model = oneshot(
 # =========================
 # Save to disk in compressed-tensors format.
 # =========================
-SAVE_DIR = require_env("DST_DIR")
+SAVE_DIR = require_env("DST_DIR").rstrip("/")  # Remove trailing slash if present
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 
