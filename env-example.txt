@@ -1,0 +1,2 @@
+SRC_DIR = "/media/models/TheDrummer/Behemoth-R1-123B-v2/main/"
+DST_DIR = "/media/models/TheHouseOfTheDude/Behemoth-R1-123B-v2_Compressed-Tensors/W4A16"
