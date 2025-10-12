@@ -1,4 +1,5 @@
 from transformers import AutoTokenizer
+import torch
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import QuantizationModifier
@@ -12,6 +13,22 @@ from dotenv import load_dotenv
 
 # Load the .env that sits next to this script (works regardless of where you run it)
 load_dotenv(Path(__file__).with_name(".env"))
+
+# =========================
+# Configure Multi-GPU Setup for FP8_BLOCK
+# =========================
+# FP8_BLOCK accumulates the quantized model in GPU memory during processing
+# For 123B models, this requires ~150GB+ total GPU memory
+# Using 2 GPUs provides more memory headroom
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    print("🔧 Multi-GPU Setup: Using GPUs 0 and 1 for FP8_BLOCK quantization")
+    print("   FP8_BLOCK requires significant GPU memory due to block-wise quantization")
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+    num_gpus = 2
+else:
+    gpu_list = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
+    num_gpus = len(gpu_list)
+    print(f"Using {num_gpus} GPU(s): {os.environ['CUDA_VISIBLE_DEVICES']}")
 
 def require_env(name: str) -> str:
     val = os.getenv(name)
@@ -32,12 +49,14 @@ if not os.path.isdir(MODEL_ID):
 model_path = str(Path(MODEL_ID).resolve())
 print(f"Loading model from: {model_path}")
 
-# Load tokenizer (model will be loaded layer-by-layer by oneshot)
+# Load tokenizer ONLY - do NOT load the model yet!
+# Sequential onloading requires passing the model PATH to oneshot(), not a loaded model
 tokenizer = AutoTokenizer.from_pretrained(
     model_path, 
     trust_remote_code=True,
     local_files_only=True  # Use local files, don't try to download from HF Hub
 )
+print("✓ Tokenizer loaded successfully")
 
 # =========================
 # Configure the quantization algorithm and scheme.
@@ -59,18 +78,62 @@ recipe = QuantizationModifier(
 # =========================
 # Apply quantization with sequential onloading.
 # =========================
-# By passing model_path as a string (instead of a loaded model), oneshot() will
-# load layers one at a time from disk -> GPU -> process -> store in system RAM.
+# CRITICAL: Pass the model PATH (string), NOT a loaded model object!
+# Sequential onloading in llm-compressor works by:
+#   1. Load one layer from disk directly to GPU
+#   2. Apply FP8_BLOCK quantization
+#   3. Offload to RAM before loading next layer
+#   4. Repeat for all layers
+#
 # This prevents VRAM exhaustion for large models like Behemoth-R1-123B-v2.
 #
 # Note: W8A8-FP8_BLOCK does NOT require a calibration dataset.
 # The quantization is performed via PTQ (Post-Training Quantization) without data.
+
+print("\n" + "="*70)
+print("Starting FP8_BLOCK quantization with sequential onloading...")
+print("="*70)
+print(f"✓ Model path: {model_path}")
+print(f"✓ Number of GPUs: {torch.cuda.device_count()}")
+if torch.cuda.is_available():
+    print(f"✓ Current CUDA device: {torch.cuda.current_device()}")
+    print("\n📊 GPU Memory Status (Before Quantization):")
+    for i in range(torch.cuda.device_count()):
+        mem_total = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+        mem_allocated = torch.cuda.memory_allocated(i) / (1024**3)
+        mem_reserved = torch.cuda.memory_reserved(i) / (1024**3)
+        print(f"   GPU {i}: {mem_allocated:.2f}GB used / {mem_total:.2f}GB total")
+    total_vram = sum(torch.cuda.get_device_properties(i).total_memory / (1024**3) 
+                     for i in range(torch.cuda.device_count()))
+    print(f"   Total Available: {total_vram:.2f}GB across {torch.cuda.device_count()} GPU(s)")
+    print(f"\n💡 FP8_BLOCK Note: Quantized model accumulates in GPU memory")
+    print(f"   Expected peak usage: ~150-160GB for 123B model")
+print("="*70 + "\n")
+
 model = oneshot(
-    model=model_path,
+    model=model_path,  # Pass PATH string for sequential onloading
     recipe=recipe,
     trust_remote_code_model=True,
     cache_dir=None,  # Don't use HF cache since we're loading locally
 )
+
+print("\n" + "="*70)
+print("✅ Quantization completed successfully!")
+print("="*70)
+
+# Report final GPU memory usage
+if torch.cuda.is_available():
+    print("\n📊 GPU Memory Status (After Quantization):")
+    for i in range(torch.cuda.device_count()):
+        mem_total = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+        mem_allocated = torch.cuda.memory_allocated(i) / (1024**3)
+        mem_reserved = torch.cuda.memory_reserved(i) / (1024**3)
+        print(f"   GPU {i}: {mem_allocated:.2f}GB used / {mem_total:.2f}GB total ({mem_allocated/mem_total*100:.1f}%)")
+    total_used = sum(torch.cuda.memory_allocated(i) / (1024**3) for i in range(torch.cuda.device_count()))
+    total_vram = sum(torch.cuda.get_device_properties(i).total_memory / (1024**3) 
+                     for i in range(torch.cuda.device_count()))
+    print(f"   Total Used: {total_used:.2f}GB / {total_vram:.2f}GB ({total_used/total_vram*100:.1f}%)")
+    print()
 
 
 
