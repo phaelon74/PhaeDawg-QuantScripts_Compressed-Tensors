@@ -1,5 +1,6 @@
+import torch
 from datasets import load_dataset
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import QuantizationModifier
@@ -25,6 +26,9 @@ if "CUDA_VISIBLE_DEVICES" not in os.environ:
 else:
     print(f"Using GPU(s): {os.environ['CUDA_VISIBLE_DEVICES']}")
 
+# Reduce CUDA memory fragmentation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 def require_env(name: str) -> str:
     val = os.getenv(name)
     if not val:
@@ -44,7 +48,26 @@ if not os.path.isdir(MODEL_ID):
 model_path = str(Path(MODEL_ID).resolve())
 print(f"Loading model from: {model_path}")
 
-# Load tokenizer (model will be loaded layer-by-layer by oneshot)
+# Sequential onloading is enabled by default in llmcompressor 0.6.0+
+# During calibration, llmcompressor will automatically load only one layer at a time to GPU
+# This allows quantization of very large models (123B+) on a single GPU
+print("\n" + "="*70)
+print("Loading model with automatic sequential onloading enabled")
+print("llmcompressor will process layers one-by-one during calibration")
+print("="*70 + "\n")
+
+# Clear GPU cache before starting
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    print("✓ CUDA cache cleared")
+
+model = AutoModelForCausalLM.from_pretrained(
+    model_path,
+    torch_dtype="auto",
+    trust_remote_code=True,
+    local_files_only=True
+)
+
 tokenizer = AutoTokenizer.from_pretrained(
     model_path, 
     trust_remote_code=True,
@@ -131,8 +154,11 @@ recipe = QuantizationModifier(
 # =========================
 # Apply quantization with sequential onloading.
 # =========================
-# By passing model_path as a string (instead of a loaded model), oneshot() will
-# load layers one at a time from disk -> GPU -> process -> store in system RAM.
+# Sequential onloading (default in llmcompressor 0.6.0+) automatically:
+# 1. Loads each layer one at a time to GPU
+# 2. Runs calibration forward passes on that layer
+# 3. Collects activation statistics and quantizes
+# 4. Offloads layer before loading the next
 # This prevents VRAM exhaustion for large models like Behemoth-R1-123B-v2.
 
 print("\n" + "="*70)
@@ -146,14 +172,13 @@ print(f"✓ Optimized for: NVIDIA Blackwell GPUs (SM 9.0+)")
 print(f"✓ Memory efficient: Works on 24GB+ GPUs for 123B models")
 print("="*70 + "\n")
 
-model = oneshot(
-    model=model_path,
+oneshot(
+    model=model,
     dataset=ds,
     recipe=recipe,
     max_seq_length=MAX_SEQUENCE_LENGTH,
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
-    trust_remote_code_model=True,
-    cache_dir=None,  # Don't use HF cache since we're loading locally
+    sequential_targets=["MistralMLP"],  # Process MLP layers sequentially (attention layers processed separately)
 )
 
 print("\n" + "="*70)

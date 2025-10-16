@@ -1,4 +1,5 @@
-from transformers import AutoTokenizer
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import QuantizationModifier
@@ -24,6 +25,9 @@ if "CUDA_VISIBLE_DEVICES" not in os.environ:
 else:
     print(f"Using GPU(s): {os.environ['CUDA_VISIBLE_DEVICES']}")
 
+# Reduce CUDA memory fragmentation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 def require_env(name: str) -> str:
     val = os.getenv(name)
     if not val:
@@ -43,7 +47,25 @@ if not os.path.isdir(MODEL_ID):
 model_path = str(Path(MODEL_ID).resolve())
 print(f"Loading model from: {model_path}")
 
-# Load tokenizer (model will be loaded layer-by-layer by oneshot)
+# CRITICAL: Load model to CPU first (device_map=None) for sequential onloading
+print("\n" + "="*70)
+print("Loading model to CPU (device_map=None)")
+print("Sequential onloading will process layers one-by-one during quantization")
+print("="*70 + "\n")
+
+# Clear GPU cache before starting
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    print("✓ CUDA cache cleared")
+
+model = AutoModelForCausalLM.from_pretrained(
+    model_path,
+    torch_dtype="auto",
+    device_map=None,  # Load to CPU, not GPU! Critical for sequential onloading
+    trust_remote_code=True,
+    local_files_only=True
+)
+
 tokenizer = AutoTokenizer.from_pretrained(
     model_path, 
     trust_remote_code=True,
@@ -72,8 +94,10 @@ recipe = QuantizationModifier(
 # =========================
 # Apply quantization with sequential onloading.
 # =========================
-# By passing model_path as a string (instead of a loaded model), oneshot() will
-# load layers one at a time from disk -> GPU -> process -> store in system RAM.
+# Model is loaded to CPU (device_map=None), then oneshot() will:
+# 1. Load each layer one at a time: CPU -> GPU
+# 2. Apply FP4 weight quantization to that layer
+# 3. Store quantized layer and offload from GPU
 # This prevents VRAM exhaustion for large models like Behemoth-R1-123B-v2.
 
 print("\n" + "="*70)
@@ -87,11 +111,10 @@ print(f"✓ Optimized for: NVIDIA Blackwell GPUs (SM 9.0+)")
 print(f"✓ Memory efficient: Works on 24GB+ GPUs for 123B models")
 print("="*70 + "\n")
 
-model = oneshot(
-    model=model_path,
+oneshot(
+    model=model,
     recipe=recipe,
-    trust_remote_code_model=True,
-    cache_dir=None,  # Don't use HF cache since we're loading locally
+    sequential_targets=["MistralMLP"],  # CRITICAL: Process MLP layers one at a time to avoid OOM
 )
 
 print("\n" + "="*70)
