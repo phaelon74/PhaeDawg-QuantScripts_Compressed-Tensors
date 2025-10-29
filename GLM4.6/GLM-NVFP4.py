@@ -22,18 +22,27 @@ def require_env(key: str) -> str:
     return val.strip()
 
 # =========================
-# Force Single GPU for Sequential Onloading
+# Multi-GPU Configuration for NVFP4
 # =========================
-# In multi-GPU environments, restrict to ONE GPU for sequential processing
+# NVFP4 calibration requires ~195GB VRAM for GLM-4.6 (357B params)
+# Using BOTH RTX PRO 6000 cards (~194GB total) for model parallelism
 if "CUDA_VISIBLE_DEVICES" not in os.environ:
-    print("⚠️  Multi-GPU detected. Restricting to GPU 0 for sequential onloading.")
-    print("   (Sequential onloading uses ONE GPU to process layers one at a time)")
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    print("✅ Multi-GPU setup detected - Using BOTH GPUs for NVFP4 calibration")
+    print("   GPU 0 + GPU 1 = ~194GB total VRAM (required for 357B model)")
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 else:
     print(f"Using GPU(s): {os.environ['CUDA_VISIBLE_DEVICES']}")
 
 # Reduce CUDA memory fragmentation and improve memory management
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:512"
+
+# Check available GPUs
+import torch
+num_gpus = torch.cuda.device_count()
+print(f"✓ Detected {num_gpus} GPU(s) available for NVFP4 quantization")
+for i in range(num_gpus):
+    props = torch.cuda.get_device_properties(i)
+    print(f"  GPU {i}: {props.name} - {props.total_memory / 1024**3:.1f} GB VRAM")
 
 # =========================
 # Model (GLM-4.6 MoE)
@@ -48,25 +57,26 @@ if not os.path.isdir(MODEL_ID):
 model_path = str(Path(MODEL_ID).resolve())
 print(f"Loading GLM-4.6 model from: {model_path}")
 
-# Sequential onloading is enabled by default in llmcompressor 0.6.0+
-# During calibration, llmcompressor will automatically load only one layer at a time to GPU
-# This allows quantization of very large models (357B params) on a single GPU
+# Multi-GPU model parallelism for NVFP4 calibration
+# device_map="auto" will automatically distribute the model across both GPUs
+# This enables NVFP4 calibration of 357B models on 2x RTX PRO 6000 (~194GB total)
 print("\n" + "="*70)
-print("Loading GLM-4.6 MoE model with automatic sequential onloading enabled")
-print("llmcompressor will process layers one-by-one during calibration")
+print("Loading GLM-4.6 MoE model with multi-GPU parallelism")
+print("Model will be distributed across both GPUs for NVFP4 calibration")
 print("="*70 + "\n")
 
 # Clear GPU cache before starting
 if torch.cuda.is_available():
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    print("✓ CUDA cache cleared and memory stats reset")
+    print("✓ CUDA cache cleared on all GPUs\n")
 
 model = AutoModelForCausalLM.from_pretrained(
     model_path,
     torch_dtype="auto",
     trust_remote_code=True,
-    local_files_only=True
+    local_files_only=True,
+    device_map="auto"  # Automatically distribute across both GPUs
 )
 
 tokenizer = AutoTokenizer.from_pretrained(
@@ -87,7 +97,9 @@ tokenizer = AutoTokenizer.from_pretrained(
 # - Provides high-quality diverse calibration data
 
 NUM_CALIBRATION_SAMPLES = 512      # Use subset for faster calibration (max 10,000 available)
-MAX_SEQUENCE_LENGTH = 2048         # Increased to leverage GLM-4.6's extended context (200K)
+                                   # Can increase to 1024+ if desired
+MAX_SEQUENCE_LENGTH = 2048         # Leverages GLM-4.6's extended context capability (200K)
+                                   # 2048 tokens works well with dual-GPU setup (~194GB VRAM)
 
 DATASET_ID = "neuralmagic/LLM_compression_calibration"
 DATASET_SPLIT = "train"
@@ -319,17 +331,16 @@ if torch.cuda.is_available():
     print("✓ Cleared GPU cache before quantization\n")
 
 # =========================
-# Apply quantization with sequential onloading.
+# Apply quantization with multi-GPU parallelism.
 # =========================
-# Sequential onloading (default in llmcompressor 0.6.0+) automatically:
-# 1. Loads each layer one at a time to GPU
-# 2. Runs calibration forward passes on that layer
+# Multi-GPU setup (device_map="auto") automatically:
+# 1. Distributes model layers across GPU 0 and GPU 1
+# 2. Runs calibration forward passes through the distributed model
 # 3. Collects activation statistics and quantizes
-# 4. Offloads layer before loading the next
-# This prevents VRAM exhaustion for large MoE models like GLM-4.6 (357B params).
+# 4. Utilizes combined VRAM (~194GB) for 357B model NVFP4 calibration
 
 print("\n" + "="*70)
-print("Starting NVFP4 quantization with sequential onloading...")
+print("Starting NVFP4 quantization with multi-GPU parallelism...")
 print("="*70)
 print(f"✓ Scheme: NVFP4 (W4A4)")
 print(f"✓ Weights: FP4 per-group-16")
@@ -339,7 +350,7 @@ print(f"  (Open-Platypus curated for LLM compression)")
 print(f"✓ Model: GLM-4.6 MoE (357B params)")
 print(f"✓ MoE handling: Shared experts + first layer + lm_head unquantized")
 print(f"✓ Optimized for: NVIDIA Blackwell GPUs (SM 9.0+)")
-print(f"✓ Memory efficient: Works on 24GB+ GPUs via sequential processing")
+print(f"✓ Multi-GPU setup: Model distributed across 2x RTX PRO 6000 (~194GB VRAM)")
 print("="*70 + "\n")
 
 oneshot(
@@ -363,8 +374,10 @@ tokenizer.save_pretrained(SAVE_DIR)
 
 print(f"\n✅ Model successfully quantized and saved to: {SAVE_DIR}")
 print("Quantization scheme: NVFP4 (W4A4) for GLM-4.6 MoE")
+print("Quantized using 2x RTX PRO 6000 Blackwell GPUs (~194GB VRAM)")
 print("Ready for inference on Blackwell GPUs with vLLM! 🚀")
-print("\nNote: On non-Blackwell GPUs (< SM 9.0), vLLM will run weights-only quantization")
+print("\nNote: For full W4A4 performance, inference requires Blackwell GPUs (SM 9.0+)")
+print("      On non-Blackwell GPUs, vLLM will run weights-only quantization")
 print("      (activations will remain unquantized for compatibility).")
 print("\nMoE-specific optimizations:")
 print("  - Shared experts preserved in FP16/BF16 for routing stability")
