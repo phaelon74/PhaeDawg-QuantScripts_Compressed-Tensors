@@ -75,8 +75,7 @@ model = AutoModelForCausalLM.from_pretrained(
     model_path,
     torch_dtype="auto",
     trust_remote_code=True,
-    local_files_only=True,
-    device_map="auto"  # Automatically distribute across both GPUs
+    local_files_only=True
 )
 
 tokenizer = AutoTokenizer.from_pretrained(
