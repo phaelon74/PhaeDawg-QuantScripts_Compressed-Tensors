@@ -78,6 +78,20 @@ model = AutoModelForCausalLM.from_pretrained(
     local_files_only=True
 )
 
+# Print model structure to identify correct sequential_targets
+print("\n" + "="*70)
+print("MODEL ARCHITECTURE (identifying layer types for sequential processing):")
+print("="*70)
+layer_types = set()
+for name, module in model.named_modules():
+    module_type = type(module).__name__
+    if "MLP" in module_type or "Block" in module_type or "Layer" in module_type:
+        layer_types.add(module_type)
+print("Key module types found:")
+for lt in sorted(layer_types):
+    print(f"  - {lt}")
+print("="*70 + "\n")
+
 tokenizer = AutoTokenizer.from_pretrained(
     model_path,
     trust_remote_code=True,
@@ -352,12 +366,21 @@ print(f"✓ Optimized for: NVIDIA Blackwell GPUs (SM 9.0+)")
 print(f"✓ Multi-GPU setup: Model distributed across 2x RTX PRO 6000 (~194GB VRAM)")
 print("="*70 + "\n")
 
+# Apply NVFP4 quantization with sequential processing
+# sequential_targets tells llmcompressor which module types to process one at a time
+# This allows the model to use both GPUs without running out of memory
+# Common patterns: MLP layers, Block layers, or specific model architecture layers
+# 
+# For GLM-4.6: May need to adjust based on model architecture printed above
+# Try in order: ["GLMBlock"], ["GLMMLP"], or check printed module types
+
 oneshot(
     model=model,
     dataset=ds,
     recipe=recipe,
     max_seq_length=MAX_SEQUENCE_LENGTH,
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
+    sequential_targets=["GLMBlock"],  # Adjust if OOM: try ["GLMMLP"] or other module types
 )
 
 print("\n" + "="*70)
