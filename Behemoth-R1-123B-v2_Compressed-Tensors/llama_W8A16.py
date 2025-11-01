@@ -103,7 +103,6 @@ quant_scheme = QuantizationScheme(
 recipe = [
     AWQModifier(
         ignore=["lm_head"],
-        targets=["Linear"],
         config_groups={"group_0": quant_scheme},
     ),
 ]

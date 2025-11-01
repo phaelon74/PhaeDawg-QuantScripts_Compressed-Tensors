@@ -33,22 +33,18 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 # =========================
 # Calibration data config
 # =========================
-NUM_CALIBRATION_SAMPLES = 256      # Adjust as needed
-MAX_SEQUENCE_LENGTH = 1024
+NUM_CALIBRATION_SAMPLES = 512      # Adjust as needed
+MAX_SEQUENCE_LENGTH = 2048
 
-DATASET_ID = "wikitext"
-DATASET_NAME = "wikitext-2-raw-v1"  # or "wikitext-103-raw-v1"
-DATASET_SPLIT = "validation"        # "train" | "validation" | "test"
+DATASET_ID = "neuralmagic/LLM_compression_calibration"
+DATASET_SPLIT = "train"
 
 # =========================
-# Load + sample WikiText
+# Load + sample neuralmagic calibration dataset
 # =========================
-ds = load_dataset(DATASET_ID, DATASET_NAME, split=DATASET_SPLIT)
+ds = load_dataset(DATASET_ID, split=DATASET_SPLIT)
 
-# Remove blank/whitespace-only lines (common in WikiText)
-ds = ds.filter(lambda ex: ex.get("text", "").strip() != "")
-
-# Random, reproducible subset of N *raw lines*
+# Random, reproducible subset of N samples
 n = min(NUM_CALIBRATION_SAMPLES, len(ds))
 ds = ds.shuffle(seed=42).select(range(n))
 
@@ -57,13 +53,14 @@ ds = ds.shuffle(seed=42).select(range(n))
 # Preprocess (batch-aware)
 # =========================
 def preprocess(batch):
-    texts = batch["text"]  # list[str]
+    # The neuralmagic dataset has a 'messages' field with pre-formatted conversations
+    messages_list = batch["messages"]  # list[list[dict]]
     rendered = [
         tokenizer.apply_chat_template(
-            [{"role": "user", "content": t}],
+            messages,
             tokenize=False,
         )
-        for t in texts
+        for messages in messages_list
     ]
     return {"text": rendered}
 
@@ -109,7 +106,6 @@ quant_scheme = QuantizationScheme(
 recipe = [
     AWQModifier(
         ignore=["lm_head"],
-        targets=["Linear"],
         config_groups={"group_0": quant_scheme},
     ),
 ]
