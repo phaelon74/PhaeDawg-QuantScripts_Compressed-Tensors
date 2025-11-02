@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -30,30 +33,31 @@ model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 # =========================
-# Calibration data (WikiText)
+# Calibration data (Neural Magic LLM Compression Calibration)
 # =========================
-NUM_CALIBRATION_SAMPLES = 256
-MAX_SEQUENCE_LENGTH = 1024
+NUM_CALIBRATION_SAMPLES = 512
+MAX_SEQUENCE_LENGTH = 2048
 
-DATASET_ID = "wikitext"
-DATASET_NAME = "wikitext-2-raw-v1"
-DATASET_SPLIT = "validation"
+DATASET_ID = "neuralmagic/LLM_compression_calibration"
+DATASET_SPLIT = "train"
 
-ds = load_dataset(DATASET_ID, DATASET_NAME, split=DATASET_SPLIT)
-ds = ds.filter(lambda ex: ex.get("text", "").strip() != "")
+ds = load_dataset(DATASET_ID, split=DATASET_SPLIT)
 
 n = min(NUM_CALIBRATION_SAMPLES, len(ds))
 ds = ds.shuffle(seed=42).select(range(n))
 
-# Render to chat-style text (batch)
+# Render messages to chat-style text (batch)
+# The neuralmagic dataset has "messages" field with user/assistant roles
 def preprocess(batch):
-    rendered = [
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": t}],
+    rendered = []
+    for messages in batch["messages"]:
+        # Apply chat template to the messages directly
+        text = tokenizer.apply_chat_template(
+            messages,
             tokenize=False,
+            add_generation_prompt=False,
         )
-        for t in batch["text"]
-    ]
+        rendered.append(text)
     return {"text": rendered}
 
 ds = ds.map(preprocess, batched=True, num_proc=4)
@@ -222,28 +226,32 @@ moe_ignores = [
     "model.layers.45.mlp.shared_experts.gate_proj",
     "model.layers.45.mlp.shared_experts.up_proj",
     "model.layers.45.mlp.shared_experts.down_proj",
+    "model.layers.46.self_attn.q_proj",
+    "model.layers.46.self_attn.k_proj",
+    "model.layers.46.self_attn.v_proj",
+    "model.layers.46.self_attn.o_proj",
+    "model.layers.46.mlp.shared_experts.gate_proj",
+    "model.layers.46.mlp.shared_experts.up_proj",
+    "model.layers.46.mlp.shared_experts.down_proj",
     "lm_head",
 ]
 
 recipe = [
     AWQModifier(
-        targets=["Linear"],        # quantize all Linear layers uniformly
         ignore=moe_ignores,
         config_groups={
             "group_0": {
-                # Don't list individual proj regexes; let "Linear" + ignore control it
                 "targets": ["Linear"],
                 "weights": {
                     "num_bits": 4,
                     "type": "int",
                     "symmetric": True,   # W4A16 (symmetric)
                     "strategy": "group",
-                    "group_size": 128,    # handles dims like 10944
+                    "group_size": 128,
                     "dynamic": False,
                 },
             },
         },
-        # Optional mappings can be added, but not required
     ),
 ]
 
@@ -258,6 +266,7 @@ oneshot(
     recipe=recipe,
     max_seq_length=MAX_SEQUENCE_LENGTH,
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
+    num_workers=4,  # Enable multi-worker processing
 #    output_dir=SAVE_DIR,
 )
 
