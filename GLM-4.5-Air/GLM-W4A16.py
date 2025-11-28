@@ -266,9 +266,16 @@ oneshot(
     recipe=recipe,
     max_seq_length=MAX_SEQUENCE_LENGTH,
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
-    num_workers=4,  # Enable multi-worker processing
 #    output_dir=SAVE_DIR,
 )
+
+# Fix generation config validation issue before saving
+if hasattr(model, 'generation_config') and model.generation_config is not None:
+    # If temperature is set but do_sample is False, either enable do_sample or remove temperature
+    if hasattr(model.generation_config, 'temperature') and model.generation_config.temperature is not None:
+        if not getattr(model.generation_config, 'do_sample', False):
+            # Set do_sample=True to make temperature valid, or remove temperature
+            model.generation_config.do_sample = True
 
 # (Optional redundant save)
 model.save_pretrained(SAVE_DIR, save_compressed=True)
