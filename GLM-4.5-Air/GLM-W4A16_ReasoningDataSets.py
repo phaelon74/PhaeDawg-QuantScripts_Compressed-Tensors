@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor import oneshot
@@ -33,22 +33,29 @@ model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 # =========================
-# Calibration data (Neural Magic LLM Compression Calibration)
+# Calibration data (Neural Magic + Rombo Optimized Reasoning)
 # =========================
 NUM_CALIBRATION_SAMPLES = 512
 MAX_SEQUENCE_LENGTH = 2048
 
-DATASET_ID = "neuralmagic/LLM_compression_calibration"
-DATASET_SPLIT = "train"
+# Calculate sample distribution: 60% Neural Magic, 40% Rombo
+NUM_NEURALMAGIC = int(NUM_CALIBRATION_SAMPLES * 0.6)  # ~307 samples
+NUM_ROMBO = NUM_CALIBRATION_SAMPLES - NUM_NEURALMAGIC  # ~205 samples
 
-ds = load_dataset(DATASET_ID, split=DATASET_SPLIT)
+print(f"Loading calibration datasets: {NUM_NEURALMAGIC} from Neural Magic, {NUM_ROMBO} from Rombo")
 
-n = min(NUM_CALIBRATION_SAMPLES, len(ds))
-ds = ds.shuffle(seed=42).select(range(n))
+# Load Neural Magic dataset
+neuralmagic_dataset_id = "neuralmagic/LLM_compression_calibration"
+neuralmagic_split = "train"
+ds_neuralmagic = load_dataset(neuralmagic_dataset_id, split=neuralmagic_split)
+
+# Sample from Neural Magic dataset
+n_nm = min(NUM_NEURALMAGIC, len(ds_neuralmagic))
+ds_neuralmagic = ds_neuralmagic.shuffle(seed=42).select(range(n_nm))
 
 # Render messages to chat-style text (batch)
 # The neuralmagic dataset has "messages" field with user/assistant roles
-def preprocess(batch):
+def preprocess_neuralmagic(batch):
     rendered = []
     for messages in batch["messages"]:
         # Apply chat template to the messages directly
@@ -60,7 +67,50 @@ def preprocess(batch):
         rendered.append(text)
     return {"text": rendered}
 
-ds = ds.map(preprocess, batched=True, num_proc=4)
+ds_neuralmagic = ds_neuralmagic.map(preprocess_neuralmagic, batched=True, num_proc=4)
+
+# Load Rombo Optimized Reasoning dataset
+rombo_dataset_id = "Rombo-Org/Optimized_Reasoning"
+rombo_split = "train"
+ds_rombo = load_dataset(rombo_dataset_id, split=rombo_split)
+
+# Sample from Rombo dataset
+n_rombo = min(NUM_ROMBO, len(ds_rombo))
+ds_rombo = ds_rombo.shuffle(seed=43).select(range(n_rombo))
+
+# Preprocess Rombo dataset
+# Format: {"instruction": "", "input": [""], "output": [""]}
+def preprocess_rombo(batch):
+    rendered = []
+    for instruction, inputs, outputs in zip(batch["instruction"], batch["input"], batch["output"]):
+        # Construct text from instruction, input, and output
+        # Combine instruction with all input/output pairs
+        text_parts = [instruction]
+        
+        # Handle input array (may contain multiple items)
+        if isinstance(inputs, list) and len(inputs) > 0:
+            for inp in inputs:
+                if inp and inp.strip():
+                    text_parts.append(f"\n\nInput: {inp}")
+        
+        # Handle output array (may contain multiple items)
+        if isinstance(outputs, list) and len(outputs) > 0:
+            for out in outputs:
+                if out and out.strip():
+                    text_parts.append(f"\n\nOutput: {out}")
+        
+        # Join all parts
+        text = "".join(text_parts)
+        rendered.append(text)
+    return {"text": rendered}
+
+ds_rombo = ds_rombo.map(preprocess_rombo, batched=True, num_proc=4)
+
+# Combine both datasets
+ds = concatenate_datasets([ds_neuralmagic, ds_rombo])
+
+# Shuffle the combined dataset
+ds = ds.shuffle(seed=44)
 
 # Tokenize in batches
 ds = ds.map(
@@ -75,6 +125,8 @@ ds = ds.map(
     remove_columns=ds.column_names,
     num_proc=4,
 )
+
+print(f"Combined calibration dataset: {len(ds)} samples")
 
 # =========================
 # AWQ recipe with config_groups
