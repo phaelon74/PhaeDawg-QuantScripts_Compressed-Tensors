@@ -29,8 +29,19 @@ DST_DIR = require_env("DST_DIR")
 # Model (gpt-oss-20b)
 # =========================
 MODEL_ID = require_env("SRC_DIR")
-model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+
+# Verify tokenizer has harmony chat template, set if missing
+# Harmony format: <|startoftext|><|message|>role: content<|return|>...
+if not hasattr(tokenizer, 'chat_template') or tokenizer.chat_template is None:
+    # Set harmony chat template for gpt-oss-20b
+    # Format: <|startoftext|><|message|>role: content<|return|>...
+    harmony_template = "<|startoftext|>{% for message in messages %}<|message|>{{ message['role'] }}: {{ message['content'] }}<|return|>{% endfor %}"
+    tokenizer.chat_template = harmony_template
+    print("✓ Set harmony chat template on tokenizer (was missing)")
+else:
+    print(f"✓ Tokenizer already has chat template: {type(tokenizer.chat_template).__name__}")
 
 # =========================
 # Calibration data (Neural Magic LLM Compression Calibration)
@@ -48,15 +59,33 @@ ds = ds.shuffle(seed=42).select(range(n))
 
 # Render messages to chat-style text (batch)
 # The neuralmagic dataset has "messages" field with user/assistant roles
+# For gpt-oss-20b, we use harmony format which uses special tokens
 def preprocess(batch):
     rendered = []
     for messages in batch["messages"]:
-        # Apply chat template to the messages directly
-        text = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=False,
-        )
+        # Try to use chat template if available
+        try:
+            if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None:
+                text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+            else:
+                raise AttributeError("No chat template")
+        except (AttributeError, ValueError):
+            # Fallback: Use harmony-like format for gpt-oss-20b
+            # Harmony format uses special tokens: <|startoftext|>, <|message|>, <|return|>, etc.
+            # Basic harmony format: <|startoftext|><|message|>role: content<|return|>...
+            formatted_parts = ["<|startoftext|>"]
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if content:
+                    # Map roles to harmony format (user/assistant are common)
+                    # Harmony uses <|message|>role: content<|return|>
+                    formatted_parts.append(f"<|message|>{role}: {content}<|return|>")
+            text = "".join(formatted_parts)
         rendered.append(text)
     return {"text": rendered}
 
