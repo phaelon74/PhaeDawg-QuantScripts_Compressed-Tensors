@@ -1,4 +1,5 @@
 
+import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM
 from huggingface_hub import hf_hub_download
@@ -33,11 +34,31 @@ MODEL_ID = require_env("SRC_DIR")
 
 def get_tokenizer(model_id: str):
     # Devstral uses mistral-common tokenizer via tekken.json
-    tekken_path = hf_hub_download(model_id, "tekken.json")
+    # Check if model_id is a local path (contains path separators or is absolute)
+    # Hugging Face repo IDs are in format "namespace/repo_name"
+    is_local_path = os.path.sep in model_id or (os.path.altsep and os.path.altsep in model_id) or os.path.isabs(model_id)
+    
+    if is_local_path:
+        # Local path - construct tekken.json path directly
+        tekken_path = os.path.join(model_id, "tekken.json")
+        if not os.path.exists(tekken_path):
+            raise FileNotFoundError(f"tekken.json not found at {tekken_path}")
+    else:
+        # Hugging Face repo ID - download from hub
+        tekken_path = hf_hub_download(model_id, "tekken.json")
     tokenizer = MistralTokenizer.from_file(tekken_path)
     return tokenizer
 
-model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
+# Disable gradients for quantization
+torch.set_grad_enabled(False)
+
+print("Loading model…")
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    torch_dtype=torch.bfloat16,
+    device_map="auto",  # let accelerate/transformers shard across GPUs
+)
+
 tokenizer = get_tokenizer(MODEL_ID)
 
 
@@ -91,11 +112,15 @@ ds = ds.map(preprocess, batched=True, num_proc=4)
 # Tokenize in batches
 # =========================
 def tokenize_batch(batch):
-    # MistralTokenizer.encode() returns list of token IDs directly
+    # MistralTokenizer doesn't have encode() - use underlying tokenizer
+    # Access the underlying Tekkenizer/SentencePieceTokenizer via instruct_tokenizer.tokenizer
+    # The base Tokenizer class has encode(s: str, bos: bool, eos: bool) -> list[int]
     # Format: {"input_ids": [[token_ids], [token_ids], ...]}
+    underlying_tokenizer = tokenizer.instruct_tokenizer.tokenizer
     tokenized = []
     for text in batch["text"]:
-        ids = tokenizer.encode(text, add_bos=True, add_eos=True)
+        # Use the underlying tokenizer's encode method with bos=True, eos=True
+        ids = underlying_tokenizer.encode(text, bos=True, eos=True)
         # Truncate to MAX_SEQUENCE_LENGTH if needed
         if len(ids) > MAX_SEQUENCE_LENGTH:
             ids = ids[:MAX_SEQUENCE_LENGTH]
@@ -168,5 +193,15 @@ try:
     tokenizer.save_pretrained(SAVE_DIR)
 except AttributeError:
     # If save_pretrained not available, copy tekken.json manually
-    tekken_path = hf_hub_download(MODEL_ID, "tekken.json")
+    # Check if MODEL_ID is a local path or Hugging Face repo ID
+    is_local_path = os.path.sep in MODEL_ID or (os.path.altsep and os.path.altsep in MODEL_ID) or os.path.isabs(MODEL_ID)
+    
+    if is_local_path:
+        # Local path - construct tekken.json path directly
+        tekken_path = os.path.join(MODEL_ID, "tekken.json")
+        if not os.path.exists(tekken_path):
+            raise FileNotFoundError(f"tekken.json not found at {tekken_path}")
+    else:
+        # Hugging Face repo ID - download from hub
+        tekken_path = hf_hub_download(MODEL_ID, "tekken.json")
     shutil.copy(tekken_path, SAVE_DIR)
