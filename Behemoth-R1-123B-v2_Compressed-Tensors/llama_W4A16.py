@@ -36,23 +36,38 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 NUM_CALIBRATION_SAMPLES = 512      # Adjust as needed
 MAX_SEQUENCE_LENGTH = 2048
 
-DATASET_ID = "neuralmagic/LLM_compression_calibration"
+# Dataset configuration with 60/40 split
+NEURALMAGIC_DATASET_ID = "neuralmagic/LLM_compression_calibration"
+ROMBO_DATASET_ID = "Rombo-Org/Optimized_Reasoning"
 DATASET_SPLIT = "train"
+
+# Calculate samples for each dataset (60% neuralmagic, 40% rombo)
+NUM_NEURALMAGIC_SAMPLES = int(NUM_CALIBRATION_SAMPLES * 0.6)  # 307 samples
+NUM_ROMBO_SAMPLES = NUM_CALIBRATION_SAMPLES - NUM_NEURALMAGIC_SAMPLES  # 205 samples
 
 # =========================
 # Load + sample neuralmagic calibration dataset
 # =========================
-ds = load_dataset(DATASET_ID, split=DATASET_SPLIT)
+ds_neuralmagic = load_dataset(NEURALMAGIC_DATASET_ID, split=DATASET_SPLIT)
 
 # Random, reproducible subset of N samples
-n = min(NUM_CALIBRATION_SAMPLES, len(ds))
-ds = ds.shuffle(seed=42).select(range(n))
+n_nm = min(NUM_NEURALMAGIC_SAMPLES, len(ds_neuralmagic))
+ds_neuralmagic = ds_neuralmagic.shuffle(seed=42).select(range(n_nm))
+
+# =========================
+# Load + sample Rombo calibration dataset
+# =========================
+ds_rombo = load_dataset(ROMBO_DATASET_ID, split=DATASET_SPLIT)
+
+# Random, reproducible subset of N samples
+n_rombo = min(NUM_ROMBO_SAMPLES, len(ds_rombo))
+ds_rombo = ds_rombo.shuffle(seed=43).select(range(n_rombo))
 
 
 # =========================
 # Preprocess (batch-aware)
 # =========================
-def preprocess(batch):
+def preprocess_neuralmagic(batch):
     # The neuralmagic dataset has a 'messages' field with pre-formatted conversations
     messages_list = batch["messages"]  # list[list[dict]]
     rendered = [
@@ -64,8 +79,44 @@ def preprocess(batch):
     ]
     return {"text": rendered}
 
-# Render chat template in batches
-ds = ds.map(preprocess, batched=True, num_proc=4)
+def preprocess_rombo(batch):
+    # The Rombo dataset has 'instruction', 'input', and 'output' fields
+    # Convert to messages format for chat template
+    rendered = []
+    for i in range(len(batch["instruction"])):
+        instruction = batch["instruction"][i]
+        inputs = batch["input"][i] if isinstance(batch["input"][i], list) else [batch["input"][i]]
+        outputs = batch["output"][i] if isinstance(batch["output"][i], list) else [batch["output"][i]]
+        
+        # Create messages format: system + user + assistant pairs
+        messages = [{"role": "system", "content": instruction}]
+        
+        # Pair up inputs and outputs (handle cases where counts might differ)
+        max_pairs = max(len(inputs), len(outputs))
+        for j in range(max_pairs):
+            if j < len(inputs):
+                messages.append({"role": "user", "content": inputs[j]})
+            if j < len(outputs):
+                messages.append({"role": "assistant", "content": outputs[j]})
+        
+        # Apply chat template
+        rendered_text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+        )
+        rendered.append(rendered_text)
+    
+    return {"text": rendered}
+
+# Render chat template in batches for both datasets
+ds_neuralmagic = ds_neuralmagic.map(preprocess_neuralmagic, batched=True, num_proc=4)
+ds_rombo = ds_rombo.map(preprocess_rombo, batched=True, num_proc=4)
+
+# =========================
+# Combine datasets
+# =========================
+from datasets import concatenate_datasets
+ds = concatenate_datasets([ds_neuralmagic, ds_rombo])
 
 # =========================
 # Tokenize in batches
