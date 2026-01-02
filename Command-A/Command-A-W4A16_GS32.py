@@ -29,7 +29,7 @@ def require_env(name: str) -> str:
 MODEL_ID = require_env("SRC_DIR")
 
 # Load model with trust_remote_code=True for Command-A models (extended vocabulary, custom layers)
-model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto", trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 # =========================
@@ -120,7 +120,7 @@ recipe = [
                     "re:.*mlp.up_proj$",
                 ],
             ),
-            AWQMapping("re:.*v_proj$", ["re:.*o_proj$"]),
+            # Removed redundant v_proj -> o_proj mapping (v_proj already handled in first mapping)
             AWQMapping("re:.*up_proj$", ["re:.*down_proj$"]),
         ],
         config_groups={"group_0": quant_scheme},
