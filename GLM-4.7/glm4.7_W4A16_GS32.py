@@ -15,6 +15,10 @@ from llmcompressor.modeling.glm4_moe import CalibrationGlm4MoeMoE
 from dotenv import load_dotenv
 
 # Load the .env that sits next to this script (works regardless of where you run it)
+# The .env file should be in the directory this script is run from and should look like the following:
+# SRC_DIR=/media/fmodels/zai-org/GLM-4.7/
+# DST_DIR=/media/fmodels/TheHouseOfTheDude/GLM-4.7_Compressed-Tensors/W4A16_GS32
+# Those two lines are all that's needed.
 load_dotenv(Path(__file__).with_name(".env"))
 
 def require_env(key: str) -> str:
