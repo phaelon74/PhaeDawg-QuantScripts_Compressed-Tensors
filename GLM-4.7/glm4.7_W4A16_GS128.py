@@ -132,7 +132,7 @@ print(f"Combined calibration dataset: {len(ds)} samples")
 # =========================
 # AWQ recipe with config_groups
 #  - Weight-only INT4 (W4A16 **symmetric**)
-#  - group_size: 32
+#  - group_size: 128
 #  - IMPORTANT: do NOT ignore mlp.gate / gate_up_proj (merged layer)
 #  - Keep router and output head unquantized
 # =========================
@@ -464,7 +464,7 @@ recipe = [
                     "type": "int",
                     "symmetric": True,   # W4A16 (symmetric)
                     "strategy": "group",
-                    "group_size": 32,
+                    "group_size": 128,
                     "dynamic": False,
                 },
             },

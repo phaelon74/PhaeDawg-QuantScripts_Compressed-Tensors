@@ -6,6 +6,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier, AWQMapping
+from llmcompressor.modeling.glm4_moe import CalibrationGlm4MoeMoE
 
 
 # =========================
