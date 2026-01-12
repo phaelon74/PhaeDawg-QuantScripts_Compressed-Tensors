@@ -1,4 +1,5 @@
 import argparse
+import yaml
 
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -10,7 +11,7 @@ from llmcompressor.utils import dispatch_for_generation
 # Parse Command-Line Arguments
 # =========================
 parser = argparse.ArgumentParser(
-    description="Run W4A16 AWQ quantization on Llama model."
+    description="Run Mixed Precision W4A16 AWQ quantization on Llama model."
 )
 parser.add_argument(
     "model_path",
@@ -22,10 +23,36 @@ parser.add_argument(
     type=str,
     help="Path to the destination directory for saving quantized model."
 )
+parser.add_argument(
+    "recipe_yaml",
+    type=str,
+    help="Path to the dataset recipe YAML file (contains max_seq_length and dataset config)."
+)
+parser.add_argument(
+    "group_size",
+    type=int,
+    help="Group size for W4A16 quantization (e.g., 32, 64, 128)."
+)
 
 args = parser.parse_args()
 model_path = args.model_path
 output_path = args.output_path
+recipe_yaml_path = args.recipe_yaml
+group_size = args.group_size
+
+# =========================
+# Load Recipe YAML and extract config
+# =========================
+with open(recipe_yaml_path, 'r') as f:
+    recipe_config = yaml.safe_load(f)
+
+# Extract max_seq_length from the calibration_set section
+calibration_config = recipe_config.get('calibration_set', {})
+MAX_SEQUENCE_LENGTH = calibration_config.get('max_seq_length', 2048)
+
+print(f"Loaded recipe from: {recipe_yaml_path}")
+print(f"  - max_seq_length: {MAX_SEQUENCE_LENGTH}")
+print(f"  - group_size: {group_size}")
 
 # =========================
 # Model
@@ -39,7 +66,6 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 # Calibration data config
 # =========================
 NUM_CALIBRATION_SAMPLES = 512      # Adjust as needed
-MAX_SEQUENCE_LENGTH = 2048
 
 DATASET_ID = "neuralmagic/LLM_compression_calibration"
 DATASET_SPLIT = "train"
@@ -93,7 +119,7 @@ ds = ds.map(
 #   * quantize self_attn layers to FP8_BLOCK (attention: k, q, o, v_proj)
 #   * quantize mlp layers to W4A16 with AWQ (MLP: down, gate, up_proj)
 # =========================
-recipe = """
+recipe = f"""
 quant_stage:
   quant_modifiers:
     QuantizationModifier:
@@ -107,7 +133,7 @@ quant_stage:
             num_bits: 4
             type: int
             symmetric: true
-            group_size: 64
+            group_size: {group_size}
             strategy: group
             dynamic: false
             observer: minmax
