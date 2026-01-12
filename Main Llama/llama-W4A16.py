@@ -66,93 +66,19 @@ print(f"  - datasets to load: {len(datasets_config)}")
 # =========================
 MODEL_ID = model_path
 
-# Load config first - this will execute custom code if trust_remote_code=True
-import json
-import os
-import sys
-
+# Load config to check model type
 config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
 print(f"Model config type: {type(config).__name__}")
 
-# Get architecture from config.json
-config_path = os.path.join(MODEL_ID, "config.json")
-architectures = []
-if os.path.exists(config_path):
-    with open(config_path, 'r') as f:
-        config_dict = json.load(f)
-    architectures = config_dict.get('architectures', [])
-    print(f"Model architectures: {architectures}")
-
-# After loading config with trust_remote_code=True, custom model classes should be registered
-print("\n=== Loading model ===")
-model = None
-
-# Method 1: Try AutoModelForCausalLM (standard)
+# Try AutoModelForCausalLM first, fallback to AutoModel for custom models
 try:
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True, config=config)
-    print("✓ Loaded with AutoModelForCausalLM")
+    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
 except ValueError as e:
-    if "Unrecognized configuration class" not in str(e):
-        raise
-    
-    print("AutoModelForCausalLM rejected custom config, trying alternative methods...")
-    
-    # Method 2: Find the model class in loaded modules
-    if architectures:
-        model_class_name = architectures[0]  # e.g., "DiaForCausalLM"
-        print(f"Looking for model class: {model_class_name}")
-        
-        # Search in sys.modules for the custom model class
-        model_class = None
-        for module_name, module in sys.modules.items():
-            if hasattr(module, model_class_name):
-                model_class = getattr(module, model_class_name)
-                print(f"Found {model_class_name} in module: {module_name}")
-                break
-        
-        if model_class:
-            try:
-                print(f"Loading model using {model_class_name}...")
-                model = model_class.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True, config=config)
-                print(f"✓ Loaded with {model_class_name}")
-            except Exception as e2:
-                print(f"Direct class load failed: {e2}")
-                model_class = None
-    
-    # Method 3: Try AutoModel (more generic)
-    if model is None:
-        from transformers import AutoModel
-        try:
-            print("Trying AutoModel...")
-            model = AutoModel.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True, config=config)
-            print("✓ Loaded with AutoModel")
-        except Exception as e3:
-            print(f"AutoModel failed: {e3}")
-    
-    # Method 4: Last resort - try AutoModel without config
-    if model is None:
-        print("Attempting AutoModel without config parameter...")
-        try:
-            from transformers import AutoModel
-            model = AutoModel.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-            print("✓ Loaded with AutoModel (without config)")
-        except Exception as e4:
-            raise ValueError(
-                f"Failed to load model with custom config '{type(config).__name__}'. "
-                f"Tried multiple methods but all failed.\n\n"
-                f"Possible solutions:\n"
-                f"1. Ensure transformers version >= 4.21.0 (for trust_remote_code support)\n"
-                f"2. Check that modeling_*.py files exist in model directory\n"
-                f"3. Verify model files (safetensors/pytorch_model.bin) exist\n"
-                f"4. Try updating transformers: pip install --upgrade transformers\n\n"
-                f"Errors encountered:\n"
-                f"- AutoModelForCausalLM: {e}\n"
-                f"- AutoModel: {e3 if 'e3' in locals() else 'not attempted'}\n"
-                f"- Direct import: {e4 if 'e4' in locals() else 'not attempted'}"
-            )
-
-if model is None:
-    raise ValueError("Failed to load model - all methods exhausted")
+    print(f"AutoModelForCausalLM failed (likely custom model): {e}")
+    print("Attempting AutoModel with trust_remote_code=True...")
+    from transformers import AutoModel
+    model = AutoModel.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
+    print("Successfully loaded model with AutoModel")
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
