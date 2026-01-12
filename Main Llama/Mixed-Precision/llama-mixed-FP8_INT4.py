@@ -65,19 +65,90 @@ print(f"  - datasets to load: {len(datasets_config)}")
 # =========================
 MODEL_ID = model_path
 
-# Load config to check model type
-config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
-print(f"Model config type: {type(config).__name__}")
+# Check what files exist in model directory
+import os
+print(f"\n=== Checking model directory: {MODEL_ID} ===")
+if os.path.exists(MODEL_ID):
+    files = os.listdir(MODEL_ID)
+    print(f"Files in directory: {files[:10]}...")  # Show first 10
+    # Check for model files
+    model_files = [f for f in files if 'model' in f.lower() or 'safetensors' in f.lower() or 'pytorch' in f.lower()]
+    print(f"Model-related files found: {len(model_files)}")
+    if model_files:
+        print(f"Sample: {model_files[:5]}")
 
-# Try AutoModelForCausalLM first, fallback to AutoModel for custom models
+# Load config first - this will load custom code if trust_remote_code=True
+config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
+print(f"\nModel config type: {type(config).__name__}")
+
+# Check config.json for architecture info
+import json
+config_path = os.path.join(MODEL_ID, "config.json")
+architectures = []
+if os.path.exists(config_path):
+    with open(config_path, 'r') as f:
+        config_dict = json.load(f)
+    architectures = config_dict.get('architectures', [])
+    print(f"Model architectures: {architectures}")
+
+# The issue: transformers checks config class BEFORE loading custom code
+# Solution: We need to use a method that bypasses the AutoModel factory check
+# Try using the model class directly from the config if available
+
+print("\n=== Loading model ===")
 try:
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
+    # Try standard approach first
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID, 
+        dtype="auto", 
+        trust_remote_code=True,
+        config=config
+    )
+    print("Successfully loaded with AutoModelForCausalLM")
 except ValueError as e:
-    print(f"AutoModelForCausalLM failed (likely custom model): {e}")
-    print("Attempting AutoModel with trust_remote_code=True...")
-    from transformers import AutoModel
-    model = AutoModel.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-    print("Successfully loaded model with AutoModel")
+    if "Unrecognized configuration class" in str(e):
+        print(f"Config class not recognized: {e}")
+        print("\nAttempting workaround: Loading model class directly from custom code...")
+        
+        # The custom code should have been loaded when we loaded the config
+        # Try to find the model class in the loaded modules
+        import sys
+        import importlib
+        
+        # Check if custom modeling module was loaded
+        custom_modules = [name for name in sys.modules.keys() if 'modeling' in name.lower() and 'dia' in name.lower()]
+        if custom_modules:
+            print(f"Found custom modules: {custom_modules}")
+        
+        # Try to get model class from config's model_type
+        model_type = getattr(config, 'model_type', None)
+        if model_type:
+            print(f"Model type from config: {model_type}")
+        
+        # Last resort: try AutoModel with config
+        from transformers import AutoModel
+        try:
+            print("Trying AutoModel.from_pretrained with config...")
+            model = AutoModel.from_pretrained(
+                MODEL_ID,
+                dtype="auto",
+                trust_remote_code=True,
+                config=config
+            )
+            print("Successfully loaded with AutoModel")
+        except Exception as e2:
+            print(f"AutoModel failed: {e2}")
+            raise ValueError(
+                f"Cannot load model with custom config '{type(config).__name__}'. "
+                f"This appears to be a custom model architecture. "
+                f"Please check:\n"
+                f"1. Model files exist in {MODEL_ID}\n"
+                f"2. Custom modeling code (modeling_*.py) exists\n"
+                f"3. transformers version supports trust_remote_code\n"
+                f"\nOriginal error: {e}\nSecondary error: {e2}"
+            )
+    else:
+        raise
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
