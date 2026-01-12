@@ -99,7 +99,7 @@ weight_args = QuantizationArgs(
     type="int",
     symmetric=True,      # SYMMETRIC (Marlin requirement)
     strategy="group",    # group-wise quantization
-    group_size=32,      # 32 groupsize (Marlin standard)
+    group_size=64,      # 32 groupsize (Marlin standard)
 )
 
 quant_scheme = QuantizationScheme(

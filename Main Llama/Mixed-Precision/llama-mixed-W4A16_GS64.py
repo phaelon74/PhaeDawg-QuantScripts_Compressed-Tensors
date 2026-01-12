@@ -1,33 +1,38 @@
+import argparse
+
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor import oneshot
-from llmcompressor.modifiers.awq import AWQModifier
 from llmcompressor.utils import dispatch_for_generation
-from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
 
 # =========================
-# Load ENV Variables
+# Parse Command-Line Arguments
 # =========================
-from pathlib import Path
-import os
-from dotenv import load_dotenv
+parser = argparse.ArgumentParser(
+    description="Run W4A16 AWQ quantization on Llama model."
+)
+parser.add_argument(
+    "model_path",
+    type=str,
+    help="Path to the source model directory."
+)
+parser.add_argument(
+    "output_path",
+    type=str,
+    help="Path to the destination directory for saving quantized model."
+)
 
-# Load the .env that sits next to this script (works regardless of where you run it)
-load_dotenv(Path(__file__).with_name(".env"))
-
-def require_env(name: str) -> str:
-    val = os.getenv(name)
-    if not val:
-        raise RuntimeError(f"Missing environment variable: {name}")
-    return val
+args = parser.parse_args()
+model_path = args.model_path
+output_path = args.output_path
 
 # =========================
 # Model
 # =========================
-MODEL_ID = require_env("SRC_DIR")
+MODEL_ID = model_path
 
-model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 # =========================
@@ -47,6 +52,7 @@ ds = load_dataset(DATASET_ID, split=DATASET_SPLIT)
 # Random, reproducible subset of N samples
 n = min(NUM_CALIBRATION_SAMPLES, len(ds))
 ds = ds.shuffle(seed=42).select(range(n))
+
 
 # =========================
 # Preprocess (batch-aware)
@@ -83,29 +89,42 @@ ds = ds.map(
 )
 
 # =========================
-# Quantization recipe
+# Mixed Precision Quantization Recipe
+#   * quantize self_attn layers to FP8_BLOCK (attention: k, q, o, v_proj)
+#   * quantize mlp layers to W4A16 with AWQ (MLP: down, gate, up_proj)
 # =========================
-weight_args = QuantizationArgs(
-    num_bits=8,
-    type="int",
-    symmetric=True,
-    strategy="group",
-    group_size=32,
-)
+recipe = """
+quant_stage:
+  quant_modifiers:
+    QuantizationModifier:
+      targets: ["re:.*(k|q|o|v)_proj$"]
+      scheme: FP8_BLOCK
+    AWQModifier:
+      config_groups:
+        group_0:
+          targets: ["re:.*(down|gate|up)_proj$"]
+          weights:
+            num_bits: 4
+            type: int
+            symmetric: true
+            group_size: 64
+            strategy: group
+            dynamic: false
+            observer: minmax
 
-quant_scheme = QuantizationScheme(
-    targets=["Linear"],
-    weights=weight_args,
-    input_activations=None,
-    output_activations=None,
-)
+      # Layers to exclude from quantization
+      ignore:
+        - "lm_head"
 
-recipe = [
-    AWQModifier(
-        ignore=["lm_head"],
-        config_groups={"group_0": quant_scheme},
-    ),
-]
+      # Scaling options
+      duo_scaling: true
+
+      mappings:
+        - smooth_layer: re:.*post_attention_layernorm$
+          balance_layers: ["re:.*gate_proj$", "re:.*up_proj$"]
+        - smooth_layer: re:.*up_proj$
+          balance_layers: ["re:.*down_proj$"]
+"""
 
 # =========================
 # Run one-shot compression
@@ -132,6 +151,8 @@ oneshot(
 # =========================
 # Save compressed model
 # =========================
-SAVE_DIR = require_env("DST_DIR")
+SAVE_DIR = output_path
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
+
+print("Saved to:", SAVE_DIR)

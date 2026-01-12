@@ -4,7 +4,6 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor import oneshot
-from llmcompressor.modifiers.awq import AWQModifier
 from llmcompressor.utils import dispatch_for_generation
 
 # =========================
@@ -90,31 +89,42 @@ ds = ds.map(
 )
 
 # =========================
-# Quantization recipe  (W4A16-SYM, Marlin-friendly)
+# Mixed Precision Quantization Recipe
+#   * quantize self_attn layers to FP8_BLOCK (attention: k, q, o, v_proj)
+#   * quantize mlp layers to W4A16 with AWQ (MLP: down, gate, up_proj)
 # =========================
-from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
+recipe = """
+quant_stage:
+  quant_modifiers:
+    QuantizationModifier:
+      targets: ["re:.*(k|q|o|v)_proj$"]
+      scheme: FP8_BLOCK
+    AWQModifier:
+      config_groups:
+        group_0:
+          targets: ["re:.*(down|gate|up)_proj$"]
+          weights:
+            num_bits: 4
+            type: int
+            symmetric: true
+            group_size: 32
+            strategy: group
+            dynamic: false
+            observer: minmax
 
-weight_args = QuantizationArgs(
-    num_bits=4,          # 4-bit weights
-    type="int",
-    symmetric=True,      # SYMMETRIC (Marlin requirement)
-    strategy="group",    # group-wise quantization
-    group_size=32,      # 32 groupsize (Marlin standard)
-)
+      # Layers to exclude from quantization
+      ignore:
+        - "lm_head"
 
-quant_scheme = QuantizationScheme(
-    targets=["Linear"],
-    weights=weight_args,
-    input_activations=None,   # A16 (leave activations in FP16/BF16)
-    output_activations=None,
-)
+      # Scaling options
+      duo_scaling: true
 
-recipe = [
-    AWQModifier(
-        ignore=["lm_head"],
-        config_groups={"group_0": quant_scheme},
-    ),
-]
+      mappings:
+        - smooth_layer: re:.*post_attention_layernorm$
+          balance_layers: ["re:.*gate_proj$", "re:.*up_proj$"]
+        - smooth_layer: re:.*up_proj$
+          balance_layers: ["re:.*down_proj$"]
+"""
 
 # =========================
 # Run one-shot compression
