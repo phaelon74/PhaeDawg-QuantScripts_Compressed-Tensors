@@ -67,30 +67,22 @@ calibration_set:
     # Essential for RP model performance
     # ================================================
     
-    # Premium Claude Sonnet character RP
-    # Note: This dataset uses 'system_prompt' + 'conversation' structure
-    - dataset: Gryphe/Sonnet3.5-Charcard-Roleplay
-      split: train
-      columns: [system_prompt, conversation]
-      formatter: sharegpt
-      num_samples: 40
-
-    # High-quality filtered RP interactions
+    # High-quality filtered RP interactions (increased samples)
     - dataset: anthracite-org/stheno-filtered-v1.1
       split: train
       columns: [conversations]
       formatter: sharegpt
-      num_samples: 32
+      num_samples: 50
 
-    # Claude Opus quality RP scenarios
+    # Claude Opus quality RP scenarios (increased samples)
     - dataset: anthracite-org/kalo-opus-instruct-22k-no-refusal
       split: train
       columns: [conversations]
       formatter: sharegpt
-      num_samples: 20
+      num_samples: 42
 
-    # Roleplay dataset (replaces deprecated PIPPA)
-    - dataset: OEvortex/roleplay-chat-sft
+    # Opus writing prompts for RP context
+    - dataset: Gryphe/Opus-WritingPrompts
       split: train
       columns: [conversations]
       formatter: sharegpt
@@ -103,26 +95,26 @@ calibration_set:
     # Critical overlap for both SW and RP
     # ================================================
     
-    # Movie dialogue (alternative to deprecated cornell-movie-dialog)
-    - dataset: lmsys/lmsys-chat-1m
-      split: train
-      columns: [conversation]
-      formatter: sharegpt
-      num_samples: 35
-
-    # Natural conversation patterns (alternative to deprecated dailydialog)
+    # Natural conversation patterns
     - dataset: stingning/ultrachat
       split: train
       columns: [data]
       formatter: chat_completion
-      num_samples: 30
+      num_samples: 40
 
-    # Persona-conditioned dialogue
+    # Persona-conditioned dialogue (increased)
     - dataset: awsaf49/persona-chat
       split: train
       columns: [persona, conversation]
       formatter: chat_completion
-      num_samples: 27
+      num_samples: 32
+
+    # Additional conversational data
+    - dataset: HuggingFaceH4/ultrachat_200k
+      split: train_sft
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 20
 
 
     # ================================================
