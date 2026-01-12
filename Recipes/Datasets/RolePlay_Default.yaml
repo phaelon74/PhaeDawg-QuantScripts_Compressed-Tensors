@@ -9,7 +9,7 @@ calibration_set:
   # Optimized for character roleplay and persona-based interaction
   # =====================================================
   
-  max_seq_length: 4096
+  max_seq_length: 2048
   shuffle: true
   seed: 42
 
