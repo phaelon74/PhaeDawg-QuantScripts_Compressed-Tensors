@@ -66,7 +66,7 @@ print(f"  - datasets to load: {len(datasets_config)}")
 # =========================
 MODEL_ID = model_path
 
-model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto")
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 
