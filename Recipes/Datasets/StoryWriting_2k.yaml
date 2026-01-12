@@ -1,0 +1,90 @@
+calibration_set:
+  _templates:
+    - role: system
+      prompt: ""
+      completion: ""
+  max_seq_length: 2048
+  shuffle: true
+  seed: 42
+  datasets:
+    # Narrative Fiction — 128 (short/concise stories)
+    - dataset: SimpleStories/SimpleStories
+      split: train
+      columns: [story]
+      formatter: raw_text
+      num_samples: 60
+    - dataset: euclaise/writingprompts
+      split: train
+      columns: [prompt, story]
+      formatter: prompt_answer
+      num_samples: 38
+    - dataset: mintujupally/ROCStories
+      split: train
+      columns: [story]
+      formatter: raw_text
+      num_samples: 30
+
+    # Dialogue & Character Voice — 77
+    - dataset: ConvLab/dailydialog
+      split: train
+      columns: [dialogues]
+      formatter: chat_completion
+      num_samples: 40
+    - dataset: persona-chat
+      split: train
+      columns: [persona, conversation]
+      formatter: chat_completion
+      num_samples: 37
+
+    # Creative Nonfiction — 51
+    - dataset: iamketan25/essay-instructions-dataset
+      split: train
+      columns: [instruction, essay]
+      formatter: prompt_answer
+      num_samples: 26
+    - dataset: nid989/EssayFroum-Dataset
+      split: train
+      columns: [prompt, essay]
+      formatter: raw_text
+      num_samples: 25
+
+    # Genre-specific Prompts — 51
+    - dataset: euclaise/WritingPrompts_preferences
+      split: train
+      columns: [prompt, story]
+      formatter: prompt_answer
+      num_samples: 30
+    - dataset: vkpriya/GPT-WritingPrompts
+      split: train
+      columns: [prompt, story]
+      formatter: prompt_answer
+      num_samples: 21
+
+    # Instruction & Writing Advice — 102
+    - dataset: databricks/databricks-dolly-15k
+      split: train
+      columns: [instruction, response]
+      formatter: prompt_answer
+      num_samples: 102
+
+    # Roleplay / Improvisation — 51
+    - dataset: Gryphe/Sonnet3.5-Charcard-Roleplay
+      split: train
+      columns: [conversation]
+      formatter: sharegpt
+      num_samples: 51
+
+    # General Chat / Conversational — 26
+    - dataset: frankdarkluo/DailyDialog
+      split: train
+      columns: [dialogue]
+      formatter: chat_completion
+      num_samples: 26
+
+    # Misc / General Knowledge — 26
+    - dataset: allenai/openbookqa
+      split: train
+      columns: [question, choices, answer]
+      formatter: prompt_answer
+      num_samples: 26
+

@@ -1,0 +1,109 @@
+calibration_set:
+  _templates:
+    - role: system
+      prompt: ""
+      completion: ""
+
+  max_seq_length: 8192
+  shuffle: true
+  seed: 42
+
+  datasets:
+
+    # --------------------------------------------------
+    # Narrative Fiction — 128 samples (25%)
+    # --------------------------------------------------
+    - dataset: SaladTechnologies/fiction-1b
+      split: train
+      columns: [text]
+      formatter: raw_text
+      num_samples: 50
+
+    - dataset: SimpleStories/SimpleStories
+      split: train
+      columns: [story]
+      formatter: raw_text
+      num_samples: 40
+
+    - dataset: agentlans/literary-synthesis
+      split: train
+      columns: [input, output]
+      formatter: prompt_answer
+      num_samples: 38
+
+
+    # --------------------------------------------------
+    # Dialogue & Character Voice — 77 samples (15%)
+    # --------------------------------------------------
+    - dataset: agentlans/multi-character-dialogue
+      split: train
+      columns: [conversation]
+      formatter: chat_completion
+      num_samples: 40
+
+    - dataset: mrfakename/voice-acting-inst-en
+      split: train
+      columns: [instruction, text]
+      formatter: prompt_answer
+      num_samples: 37
+
+
+    # --------------------------------------------------
+    # Creative Nonfiction — 51 samples (10%)
+    # --------------------------------------------------
+    - dataset: databricks/databricks-dolly-15k
+      split: train
+      columns: [instruction, response]
+      formatter: prompt_answer
+      num_samples: 51
+
+
+    # --------------------------------------------------
+    # Genre-specific Prompts — 51 samples (10%)
+    # --------------------------------------------------
+    - dataset: andrewelawrence/writingPrompts-merged
+      split: train
+      columns: [prompt, story]
+      formatter: prompt_answer
+      num_samples: 51
+
+
+    # --------------------------------------------------
+    # Instruction & Writing Advice — 102 samples (20%)
+    # --------------------------------------------------
+    - dataset: databricks/databricks-dolly-15k
+      split: train
+      columns: [instruction, response]
+      formatter: prompt_answer
+      num_samples: 102
+
+
+    # --------------------------------------------------
+    # Roleplay / Improvisation — 51 samples (10%)
+    # --------------------------------------------------
+    - dataset: agentlans/combined-roleplay
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 51
+
+
+    # --------------------------------------------------
+    # General Chat / Conversational — 26 samples (5%)
+    # --------------------------------------------------
+    - dataset: HuggingFaceH4/ultrachat_200k
+      split: train_sft
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 26
+
+
+    # --------------------------------------------------
+    # Misc / General Knowledge — 26 samples (5%)
+    # --------------------------------------------------
+    - dataset: MuskumPillerum/General-Knowledge
+      split: train
+      columns: [Question, Answer]
+      formatter: prompt_answer
+      num_samples: 26
+
