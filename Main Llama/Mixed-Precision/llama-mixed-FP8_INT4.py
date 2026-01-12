@@ -166,6 +166,8 @@ FORMATTERS = {
 print("\n=== Loading datasets from recipe ===")
 all_datasets = []
 total_samples = 0
+total_requested = 0
+total_lost = 0
 
 for ds_config in datasets_config:
     dataset_name = ds_config['dataset']
@@ -175,6 +177,7 @@ for ds_config in datasets_config:
     num_samples = ds_config.get('num_samples', 10)
     streaming = ds_config.get('streaming', False)
     
+    total_requested += num_samples
     print(f"  Loading: {dataset_name} (split={split}, samples={num_samples}, formatter={formatter_name})")
     
     try:
@@ -187,11 +190,17 @@ for ds_config in datasets_config:
             ds = list(ds)
             from datasets import Dataset
             ds = Dataset.from_list(ds)
+            samples_available = num_samples  # Can't know for streaming
         else:
             ds = load_dataset(dataset_name, split=split)
+            samples_available = len(ds)
             # Sample from dataset
             n = min(num_samples, len(ds))
+            if n < num_samples:
+                print(f"    [!] Only {samples_available} available, requested {num_samples}")
             ds = ds.shuffle(seed=SEED).select(range(n))
+        
+        samples_before_format = len(ds)
         
         # Get formatter function
         formatter_fn = FORMATTERS.get(formatter_name, format_raw_text)
@@ -203,16 +212,33 @@ for ds_config in datasets_config:
             num_proc=1,  # Use single proc to avoid tokenizer issues
         )
         
+        samples_before_filter = len(ds)
+        
         # Filter out empty texts
         ds = ds.filter(lambda x: len(x.get('text', '')) > 0)
         
+        samples_after_filter = len(ds)
+        lost = num_samples - samples_after_filter
+        
+        if samples_after_filter < samples_before_filter:
+            print(f"    [!] Filtered out {samples_before_filter - samples_after_filter} empty samples")
+        
         all_datasets.append(ds)
         total_samples += len(ds)
-        print(f"    -> Loaded {len(ds)} samples")
+        total_lost += lost
+        
+        status = "✓" if samples_after_filter == num_samples else "⚠"
+        print(f"    -> {status} Loaded {samples_after_filter}/{num_samples} samples")
         
     except Exception as e:
-        print(f"    -> WARNING: Failed to load {dataset_name}: {e}")
+        print(f"    -> ✗ FAILED to load {dataset_name}: {e}")
+        total_lost += num_samples
         continue
+
+print(f"\n=== Dataset Loading Summary ===")
+print(f"  Requested: {total_requested} samples")
+print(f"  Loaded:    {total_samples} samples")
+print(f"  Lost:      {total_lost} samples ({100*total_lost/total_requested:.1f}%)")
 
 # Concatenate all datasets
 if not all_datasets:
