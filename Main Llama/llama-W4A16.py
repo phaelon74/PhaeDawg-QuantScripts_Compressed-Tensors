@@ -88,28 +88,63 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 # =========================
 def format_sharegpt(example, columns, tokenizer):
     """Format ShareGPT-style conversations."""
-    conv_column = columns[0]  # e.g., 'conversations' or 'conversation'
+    formatted_messages = []
+    
+    # Check if first column is system_prompt (for datasets like Gryphe/Sonnet3.5-Charcard-Roleplay)
+    if len(columns) >= 2 and 'system' in columns[0].lower():
+        system_prompt = example.get(columns[0], '')
+        if system_prompt:
+            formatted_messages.append({'role': 'system', 'content': str(system_prompt)})
+        conv_column = columns[1]
+    else:
+        conv_column = columns[0]
+    
+    # Get conversation data
     messages = example.get(conv_column, [])
     
+    # Handle case where messages is a string (some datasets store JSON strings)
+    if isinstance(messages, str):
+        try:
+            import json
+            messages = json.loads(messages)
+        except:
+            # Not JSON, treat as raw text
+            formatted_messages.append({'role': 'user', 'content': messages})
+            if formatted_messages:
+                text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
+                return {'text': text}
+            return {'text': ''}
+    
     # Convert to standard format if needed
-    formatted_messages = []
-    for msg in messages:
-        role = msg.get('role', msg.get('from', 'user'))
-        content = msg.get('content', msg.get('value', ''))
-        # Normalize role names
-        if role in ['human', 'user']:
-            role = 'user'
-        elif role in ['gpt', 'assistant', 'bot']:
-            role = 'assistant'
-        elif role == 'system':
-            role = 'system'
-        formatted_messages.append({'role': role, 'content': content})
+    if isinstance(messages, list):
+        for msg in messages:
+            if isinstance(msg, dict):
+                role = msg.get('role', msg.get('from', 'user'))
+                content = msg.get('content', msg.get('value', ''))
+                # Normalize role names
+                if role in ['human', 'user']:
+                    role = 'user'
+                elif role in ['gpt', 'assistant', 'bot']:
+                    role = 'assistant'
+                elif role == 'system':
+                    role = 'system'
+                if content:  # Only add if there's content
+                    formatted_messages.append({'role': role, 'content': str(content)})
+            elif isinstance(msg, str):
+                # Alternate user/assistant for string lists
+                idx = len([m for m in formatted_messages if m['role'] != 'system'])
+                role = 'user' if idx % 2 == 0 else 'assistant'
+                formatted_messages.append({'role': role, 'content': str(msg)})
     
     if not formatted_messages:
         return {'text': ''}
     
-    text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
-    return {'text': text}
+    try:
+        text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
+        return {'text': text}
+    except Exception as e:
+        # If chat template fails, return empty
+        return {'text': ''}
 
 
 def format_prompt_answer(example, columns, tokenizer):

@@ -68,9 +68,10 @@ calibration_set:
     # ================================================
     
     # Premium Claude Sonnet character RP
+    # Note: This dataset uses 'system_prompt' + 'conversation' structure
     - dataset: Gryphe/Sonnet3.5-Charcard-Roleplay
       split: train
-      columns: [conversation]
+      columns: [system_prompt, conversation]
       formatter: sharegpt
       num_samples: 40
 
@@ -88,10 +89,10 @@ calibration_set:
       formatter: sharegpt
       num_samples: 20
 
-    # Community-driven diverse RP
-    - dataset: PygmalionAI/PIPPA
+    # Roleplay dataset (replaces deprecated PIPPA)
+    - dataset: OEvortex/roleplay-chat-sft
       split: train
-      columns: [bot_name, conversation]
+      columns: [conversations]
       formatter: sharegpt
       num_samples: 10
 
@@ -102,17 +103,17 @@ calibration_set:
     # Critical overlap for both SW and RP
     # ================================================
     
-    # Authentic movie character voices
-    - dataset: cornell-movie-dialog/cornell_movie_dialog
+    # Movie dialogue (alternative to deprecated cornell-movie-dialog)
+    - dataset: lmsys/lmsys-chat-1m
       split: train
-      columns: [line_text, character]
-      formatter: chat_completion
+      columns: [conversation]
+      formatter: sharegpt
       num_samples: 35
 
-    # Natural conversation patterns
-    - dataset: ConvLab/dailydialog
+    # Natural conversation patterns (alternative to deprecated dailydialog)
+    - dataset: stingning/ultrachat
       split: train
-      columns: [dialogues]
+      columns: [data]
       formatter: chat_completion
       num_samples: 30
 
