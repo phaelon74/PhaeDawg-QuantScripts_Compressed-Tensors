@@ -2,7 +2,7 @@ import argparse
 import yaml
 
 from datasets import load_dataset, concatenate_datasets
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor import oneshot
 from llmcompressor.utils import dispatch_for_generation
@@ -65,20 +65,7 @@ print(f"  - datasets to load: {len(datasets_config)}")
 # =========================
 MODEL_ID = model_path
 
-# Load config to check model type
-config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
-print(f"Model config type: {type(config).__name__}")
-
-# Try AutoModelForCausalLM first, fallback to AutoModel for custom models
-try:
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-except ValueError as e:
-    print(f"AutoModelForCausalLM failed (likely custom model): {e}")
-    print("Attempting AutoModel with trust_remote_code=True...")
-    from transformers import AutoModel
-    model = AutoModel.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-    print("Successfully loaded model with AutoModel")
-
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 
