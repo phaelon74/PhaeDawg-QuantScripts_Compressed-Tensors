@@ -10,7 +10,7 @@ calibration_set:
   # creative writing AND character roleplay
   # =====================================================
   
-  max_seq_length: 2048
+  max_seq_length: 4096
   shuffle: true
   seed: 42
 
