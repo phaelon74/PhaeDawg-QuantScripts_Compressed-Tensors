@@ -5,14 +5,14 @@ from datasets import load_dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
 from llmcompressor import oneshot
-from llmcompressor.modifiers.awq import AWQModifier
+from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor.utils import dispatch_for_generation
 
 # =========================
 # Parse Command-Line Arguments
 # =========================
 parser = argparse.ArgumentParser(
-    description="Run W4A16 AWQ quantization on Llama model."
+    description="Run W8A16 GPTQ quantization on Llama model (no AWQ)."
 )
 parser.add_argument(
     "model_path",
@@ -32,7 +32,7 @@ parser.add_argument(
 parser.add_argument(
     "group_size",
     type=int,
-    help="Group size for W4A16 quantization (e.g., 32, 64, 128)."
+    help="Group size for W8A16 quantization (e.g., 32, 64, 128)."
 )
 
 args = parser.parse_args()
@@ -297,29 +297,30 @@ print(f"Tokenized {NUM_CALIBRATION_SAMPLES} samples (max_seq_length={MAX_SEQUENC
 
 
 # =========================
-# Quantization recipe  (W4A16-SYM, Marlin-friendly)
+# Quantization recipe  (W8A16-SYM, non-AWQ GPTQ)
 # =========================
 from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
 
-weight_args = QuantizationArgs(
-    num_bits=8,          # 8-bit weights
+weight_quant_args = QuantizationArgs(
+    num_bits=8,           # W8 = 8-bit weights
     type="int",
-    symmetric=True,      # SYMMETRIC (Marlin requirement)
-    strategy="group",    # group-wise quantization
-    group_size=group_size,  # Dynamic group size from argument
+    symmetric=True,       # Symmetric quantization (Marlin-friendly)
+    strategy="group",     # Group-wise quantization
+    group_size=group_size,  # User-specified group size
 )
 
 quant_scheme = QuantizationScheme(
     targets=["Linear"],
-    weights=weight_args,
-    input_activations=None,   # A16 (leave activations in FP16/BF16)
+    weights=weight_quant_args,
+    input_activations=None,   # A16 = activations untouched (FP16/BF16)
     output_activations=None,
 )
 
 recipe = [
-    AWQModifier(
+    GPTQModifier(
         ignore=["lm_head"],
         config_groups={"group_0": quant_scheme},
+        dampening_frac=0.1,  # Standard GPTQ dampening
     ),
 ]
 
