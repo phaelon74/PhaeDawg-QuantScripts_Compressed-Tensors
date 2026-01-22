@@ -1,5 +1,11 @@
 import argparse
 import yaml
+import logging
+import sys
+from datetime import datetime
+from pathlib import Path
+import csv
+import re
 
 from datasets import load_dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
@@ -42,6 +48,149 @@ recipe_yaml_path = args.recipe_yaml
 group_size = args.group_size
 
 # =========================
+# Setup Logging and Metrics Collection
+# =========================
+# Create log directory in output path
+log_dir = Path(output_path).parent / "quantization_logs"
+log_dir.mkdir(exist_ok=True)
+
+# Create timestamped log file
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+log_file = log_dir / f"quantization_{timestamp}.log"
+metrics_csv = log_dir / f"quantization_metrics_{timestamp}.csv"
+
+# Setup logging to both file and console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(name)s | %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, mode='w'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+# Configure llmcompressor logging
+logging.getLogger('llmcompressor').setLevel(logging.INFO)
+logging.getLogger('compressed_tensors').setLevel(logging.INFO)
+
+logger = logging.getLogger(__name__)
+logger.info(f"Logging to: {log_file}")
+logger.info(f"Metrics will be saved to: {metrics_csv}")
+
+# Metrics collector
+class MetricsCollector:
+    def __init__(self, csv_path):
+        self.metrics = []
+        self.csv_path = csv_path
+        self.current_module = None  # Track current module being quantized
+        self.current_metric = {}  # Accumulate metric data
+        
+    def parse_log_line(self, line):
+        """Parse log line to extract quantization metrics"""
+        # Pattern: Quantizing model.layers.X.module_name
+        module_match = re.search(r'Quantizing (model\.[\w.]+)', line)
+        if module_match:
+            # New module started - save previous if complete
+            if self.current_module and 'error' in self.current_metric:
+                self.metrics.append({
+                    'module': self.current_module,
+                    'error': self.current_metric.get('error'),
+                    'time': self.current_metric.get('time'),
+                    'size_mb': self.current_metric.get('size_mb'),
+                })
+            # Start new module
+            self.current_module = module_match.group(1)
+            self.current_metric = {}
+            return None
+        
+        # Pattern: METRIC - error X.XX
+        error_match = re.search(r'METRIC - error ([\d.]+)', line)
+        if error_match:
+            self.current_metric['error'] = float(error_match.group(1))
+        
+        # Pattern: METRIC - time X.XXs
+        time_match = re.search(r'METRIC - time ([\d.]+)s', line)
+        if time_match:
+            self.current_metric['time'] = float(time_match.group(1))
+        
+        # Pattern: METRIC - Compressed module size: X.XX MB
+        size_match = re.search(r'METRIC - Compressed module size: ([\d.]+) MB', line)
+        if size_match:
+            self.current_metric['size_mb'] = float(size_match.group(1))
+            # Size is usually the last metric, save if we have error
+            if self.current_module and 'error' in self.current_metric:
+                self.metrics.append({
+                    'module': self.current_module,
+                    'error': self.current_metric.get('error'),
+                    'time': self.current_metric.get('time'),
+                    'size_mb': self.current_metric.get('size_mb'),
+                })
+                self.current_metric = {}
+        
+        return None
+    
+    def add_metric(self, module, error, time=None, size_mb=None):
+        """Add a metric entry"""
+        self.metrics.append({
+            'module': module,
+            'error': error,
+            'time': time,
+            'size_mb': size_mb,
+        })
+    
+    def save_csv(self):
+        """Save metrics to CSV file"""
+        # Save any remaining incomplete metric
+        if self.current_module and 'error' in self.current_metric:
+            self.metrics.append({
+                'module': self.current_module,
+                'error': self.current_metric.get('error'),
+                'time': self.current_metric.get('time'),
+                'size_mb': self.current_metric.get('size_mb'),
+            })
+        
+        if not self.metrics:
+            logger.warning("No metrics collected to save")
+            return
+            
+        with open(self.csv_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=['module', 'error', 'time', 'size_mb'])
+            writer.writeheader()
+            writer.writerows(self.metrics)
+        
+        logger.info(f"Saved {len(self.metrics)} metrics to {self.csv_path}")
+        
+        # Print summary
+        if self.metrics:
+            errors = [m['error'] for m in self.metrics if m['error'] is not None]
+            if errors:
+                logger.info(f"\n=== Quantization Error Summary ===")
+                logger.info(f"Total layers quantized: {len(self.metrics)}")
+                logger.info(f"Average error: {sum(errors)/len(errors):.2f}")
+                logger.info(f"Min error: {min(errors):.2f}")
+                logger.info(f"Max error: {max(errors):.2f}")
+                logger.info(f"Layers with error > 10: {sum(1 for e in errors if e > 10)}")
+                logger.info(f"Layers with error > 20: {sum(1 for e in errors if e > 20)}")
+
+metrics_collector = MetricsCollector(metrics_csv)
+
+# Custom log handler to capture metrics
+class MetricsLogHandler(logging.Handler):
+    def emit(self, record):
+        msg = self.format(record)
+        metric = metrics_collector.parse_log_line(msg)
+        if metric:
+            metrics_collector.add_metric(**metric)
+
+metrics_handler = MetricsLogHandler()
+metrics_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(metrics_handler)
+
+logger.info("="*80)
+logger.info("Starting W8A16 GPTQ Quantization")
+logger.info("="*80)
+
+# =========================
 # Load Recipe YAML and extract config
 # =========================
 with open(recipe_yaml_path, 'r') as f:
@@ -54,12 +203,12 @@ SHUFFLE = calibration_config.get('shuffle', True)
 SEED = calibration_config.get('seed', 42)
 datasets_config = calibration_config.get('datasets', [])
 
-print(f"Loaded recipe from: {recipe_yaml_path}")
-print(f"  - max_seq_length: {MAX_SEQUENCE_LENGTH}")
-print(f"  - shuffle: {SHUFFLE}")
-print(f"  - seed: {SEED}")
-print(f"  - group_size: {group_size}")
-print(f"  - datasets to load: {len(datasets_config)}")
+logger.info(f"Loaded recipe from: {recipe_yaml_path}")
+logger.info(f"  - max_seq_length: {MAX_SEQUENCE_LENGTH}")
+logger.info(f"  - shuffle: {SHUFFLE}")
+logger.info(f"  - seed: {SEED}")
+logger.info(f"  - group_size: {group_size}")
+logger.info(f"  - datasets to load: {len(datasets_config)}")
 
 # =========================
 # Model
@@ -68,17 +217,17 @@ MODEL_ID = model_path
 
 # Load config to check model type
 config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
-print(f"Model config type: {type(config).__name__}")
+logger.info(f"Model config type: {type(config).__name__}")
 
 # Try AutoModelForCausalLM first, fallback to AutoModel for custom models
 try:
     model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
 except ValueError as e:
-    print(f"AutoModelForCausalLM failed (likely custom model): {e}")
-    print("Attempting AutoModel with trust_remote_code=True...")
+    logger.warning(f"AutoModelForCausalLM failed (likely custom model): {e}")
+    logger.info("Attempting AutoModel with trust_remote_code=True...")
     from transformers import AutoModel
     model = AutoModel.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-    print("Successfully loaded model with AutoModel")
+    logger.info("Successfully loaded model with AutoModel")
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
@@ -212,7 +361,7 @@ FORMATTERS = {
 # =========================
 # Load datasets from YAML recipe
 # =========================
-print("\n=== Loading datasets from recipe ===")
+logger.info("\n=== Loading datasets from recipe ===")
 all_datasets = []
 total_samples = 0
 
@@ -224,7 +373,7 @@ for ds_config in datasets_config:
     num_samples = ds_config.get('num_samples', 10)
     streaming = ds_config.get('streaming', False)
     
-    print(f"  Loading: {dataset_name} (split={split}, samples={num_samples}, formatter={formatter_name})")
+    logger.info(f"  Loading: {dataset_name} (split={split}, samples={num_samples}, formatter={formatter_name})")
     
     try:
         # Load dataset
@@ -257,10 +406,10 @@ for ds_config in datasets_config:
         
         all_datasets.append(ds)
         total_samples += len(ds)
-        print(f"    -> Loaded {len(ds)} samples")
+        logger.info(f"    -> Loaded {len(ds)} samples")
         
     except Exception as e:
-        print(f"    -> WARNING: Failed to load {dataset_name}: {e}")
+        logger.warning(f"    -> WARNING: Failed to load {dataset_name}: {e}")
         continue
 
 # Concatenate all datasets
@@ -268,7 +417,7 @@ if not all_datasets:
     raise ValueError("No datasets were successfully loaded from the recipe!")
 
 ds = concatenate_datasets(all_datasets)
-print(f"\n=== Total samples loaded: {total_samples} ===")
+logger.info(f"\n=== Total samples loaded: {total_samples} ===")
 
 # Shuffle combined dataset if requested
 if SHUFFLE:
@@ -278,7 +427,7 @@ if SHUFFLE:
 # =========================
 # Tokenize in batches
 # =========================
-print("\n=== Tokenizing dataset ===")
+logger.info("\n=== Tokenizing dataset ===")
 ds = ds.map(
     lambda batch: tokenizer(
         batch["text"],
@@ -293,7 +442,7 @@ ds = ds.map(
 )
 
 NUM_CALIBRATION_SAMPLES = len(ds)
-print(f"Tokenized {NUM_CALIBRATION_SAMPLES} samples (max_seq_length={MAX_SEQUENCE_LENGTH})")
+logger.info(f"Tokenized {NUM_CALIBRATION_SAMPLES} samples (max_seq_length={MAX_SEQUENCE_LENGTH})")
 
 
 # =========================
@@ -320,14 +469,16 @@ recipe = [
     GPTQModifier(
         ignore=["lm_head"],
         config_groups={"group_0": quant_scheme},
-        dampening_frac=0.1,  # Standard GPTQ dampening
+        dampening_frac=0.1,  # Standard GPTQ dampening (lower = more aggressive, higher = more stable)
+        actorder=True,       # Activation order optimization - improves accuracy for sensitive layers
+        block_size=128,      # Columns processed per pass (default: 128)
     ),
 ]
 
 # =========================
 # Run one-shot compression
 # =========================
-print("\n=== Running one-shot compression ===")
+logger.info("\n=== Running one-shot compression ===")
 oneshot(
     model=model,
     dataset=ds,
@@ -354,5 +505,15 @@ SAVE_DIR = output_path
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 
+# Save metrics
+metrics_collector.save_csv()
+
+logger.info("\n=== Complete ===")
+logger.info(f"Saved model to: {SAVE_DIR}")
+logger.info(f"Log file: {log_file}")
+logger.info(f"Metrics CSV: {metrics_csv}")
+
 print("\n=== Complete ===")
 print("Saved to:", SAVE_DIR)
+print(f"Log file: {log_file}")
+print(f"Metrics CSV: {metrics_csv}")
