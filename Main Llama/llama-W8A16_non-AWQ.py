@@ -470,7 +470,7 @@ recipe = [
         ignore=["lm_head"],
         config_groups={"group_0": quant_scheme},
         dampening_frac=0.25,  # Standard GPTQ dampening (lower = more aggressive, higher = more stable)
-        actorder=True,       # Activation order optimization - improves accuracy for sensitive layers
+        actorder="dynamic",       # Activation order optimization - improves accuracy for sensitive layers
         block_size=128,      # Columns processed per pass (default: 128)
     ),
 ]
