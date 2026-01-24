@@ -59,23 +59,8 @@ timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_file = log_dir / f"quantization_{timestamp}.log"
 metrics_csv = log_dir / f"quantization_metrics_{timestamp}.csv"
 
-# Setup logging to both file and console
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(name)s | %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file, mode='w'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
-# Configure llmcompressor logging
-logging.getLogger('llmcompressor').setLevel(logging.INFO)
-logging.getLogger('compressed_tensors').setLevel(logging.INFO)
-
-logger = logging.getLogger(__name__)
-logger.info(f"Logging to: {log_file}")
-logger.info(f"Metrics will be saved to: {metrics_csv}")
+# Open log file for writing
+log_file_handle = open(log_file, 'w', encoding='utf-8')
 
 # Metrics collector
 class MetricsCollector:
@@ -129,15 +114,6 @@ class MetricsCollector:
         
         return None
     
-    def add_metric(self, module, error, time=None, size_mb=None):
-        """Add a metric entry"""
-        self.metrics.append({
-            'module': module,
-            'error': error,
-            'time': time,
-            'size_mb': size_mb,
-        })
-    
     def save_csv(self):
         """Save metrics to CSV file"""
         # Save any remaining incomplete metric
@@ -150,7 +126,7 @@ class MetricsCollector:
             })
         
         if not self.metrics:
-            logger.warning("No metrics collected to save")
+            print("WARNING: No metrics collected to save", file=sys.stderr)
             return
             
         with open(self.csv_path, 'w', newline='') as f:
@@ -158,37 +134,99 @@ class MetricsCollector:
             writer.writeheader()
             writer.writerows(self.metrics)
         
-        logger.info(f"Saved {len(self.metrics)} metrics to {self.csv_path}")
+        print(f"Saved {len(self.metrics)} metrics to {self.csv_path}")
         
         # Print summary
         if self.metrics:
             errors = [m['error'] for m in self.metrics if m['error'] is not None]
             if errors:
-                logger.info(f"\n=== Quantization Error Summary ===")
-                logger.info(f"Total layers quantized: {len(self.metrics)}")
-                logger.info(f"Average error: {sum(errors)/len(errors):.2f}")
-                logger.info(f"Min error: {min(errors):.2f}")
-                logger.info(f"Max error: {max(errors):.2f}")
-                logger.info(f"Layers with error > 10: {sum(1 for e in errors if e > 10)}")
-                logger.info(f"Layers with error > 20: {sum(1 for e in errors if e > 20)}")
+                print(f"\n=== Quantization Error Summary ===")
+                print(f"Total layers quantized: {len(self.metrics)}")
+                print(f"Average error: {sum(errors)/len(errors):.2f}")
+                print(f"Min error: {min(errors):.2f}")
+                print(f"Max error: {max(errors):.2f}")
+                print(f"Layers with error > 10: {sum(1 for e in errors if e > 10)}")
+                print(f"Layers with error > 20: {sum(1 for e in errors if e > 20)}")
 
 metrics_collector = MetricsCollector(metrics_csv)
 
-# Custom log handler to capture metrics
-class MetricsLogHandler(logging.Handler):
-    def emit(self, record):
-        msg = self.format(record)
-        metric = metrics_collector.parse_log_line(msg)
-        if metric:
-            metrics_collector.add_metric(**metric)
+# Custom stdout/stderr wrapper to capture all output
+class TeeOutput:
+    def __init__(self, *files):
+        self.files = files
+        self.original_stdout = sys.stdout
+        self.original_stderr = sys.stderr
+        
+    def write(self, data):
+        # Write to all files and original stdout
+        for f in self.files:
+            f.write(data)
+            f.flush()
+        self.original_stdout.write(data)
+        self.original_stdout.flush()
+        
+        # Parse for metrics
+        if data.strip():
+            metrics_collector.parse_log_line(data)
+    
+    def flush(self):
+        for f in self.files:
+            f.flush()
+        self.original_stdout.flush()
 
-metrics_handler = MetricsLogHandler()
-metrics_handler.setLevel(logging.INFO)
-logging.getLogger().addHandler(metrics_handler)
+class TeeError:
+    def __init__(self, *files):
+        self.files = files
+        self.original_stderr = sys.stderr
+        
+    def write(self, data):
+        # Write to all files and original stderr
+        for f in self.files:
+            f.write(data)
+            f.flush()
+        self.original_stderr.write(data)
+        self.original_stderr.flush()
+        
+        # Parse for metrics
+        if data.strip():
+            metrics_collector.parse_log_line(data)
+    
+    def flush(self):
+        for f in self.files:
+            f.flush()
+        self.original_stderr.flush()
+
+# Store original stdout/stderr before replacing
+original_stdout = sys.stdout
+original_stderr = sys.stderr
+
+# Replace stdout/stderr to capture all output
+tee_stdout = TeeOutput(log_file_handle)
+tee_stderr = TeeError(log_file_handle)
+sys.stdout = tee_stdout
+sys.stderr = tee_stderr
+
+# Setup logging to both file and console (after stdout replacement so StreamHandler uses tee)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(name)s | %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, mode='w'),
+        logging.StreamHandler(sys.stdout)  # This will now use our tee wrapper
+    ]
+)
+
+# Configure llmcompressor logging
+logging.getLogger('llmcompressor').setLevel(logging.INFO)
+logging.getLogger('compressed_tensors').setLevel(logging.INFO)
+
+logger = logging.getLogger(__name__)
 
 logger.info("="*80)
 logger.info("Starting W8A16 GPTQ Quantization")
 logger.info("="*80)
+logger.info(f"Logging to: {log_file}")
+logger.info(f"Metrics will be saved to: {metrics_csv}")
 
 # =========================
 # Load Recipe YAML and extract config
@@ -470,7 +508,7 @@ recipe = [
         ignore=["lm_head"],
         config_groups={"group_0": quant_scheme},
         dampening_frac=0.1,  # Standard GPTQ dampening (lower = more aggressive, higher = more stable)
-        actorder="dynamic",       # Activation order optimization - improves accuracy for sensitive layers
+        actorder="dynamic",  # Activation order optimization: 'dynamic' orders by activation magnitude for better accuracy
         block_size=128,      # Columns processed per pass (default: 128)
     ),
 ]
@@ -505,13 +543,15 @@ SAVE_DIR = output_path
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 
+# Restore original stdout/stderr before saving metrics (so summary prints correctly)
+sys.stdout = original_stdout
+sys.stderr = original_stderr
+
 # Save metrics
 metrics_collector.save_csv()
 
-logger.info("\n=== Complete ===")
-logger.info(f"Saved model to: {SAVE_DIR}")
-logger.info(f"Log file: {log_file}")
-logger.info(f"Metrics CSV: {metrics_csv}")
+# Close log file
+log_file_handle.close()
 
 print("\n=== Complete ===")
 print("Saved to:", SAVE_DIR)
