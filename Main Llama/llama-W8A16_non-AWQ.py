@@ -2,6 +2,8 @@ import argparse
 import yaml
 import logging
 import sys
+import os
+import threading
 from datetime import datetime
 from pathlib import Path
 import csv
@@ -61,6 +63,68 @@ metrics_csv = log_dir / f"quantization_metrics_{timestamp}.csv"
 
 # Open log file for writing
 log_file_handle = open(log_file, 'w', encoding='utf-8')
+
+# File descriptor-level stderr interceptor to catch structlog output
+class FDStderrInterceptor:
+    def __init__(self, log_file_handle, metrics_collector):
+        self.log_file_handle = log_file_handle
+        self.metrics_collector = metrics_collector
+        self.original_stderr_fd = sys.stderr.fileno()
+        self.original_stderr = sys.stderr
+        
+        # Create a pipe
+        self.read_fd, self.write_fd = os.pipe()
+        
+        # Save a copy of original stderr
+        self.saved_stderr_fd = os.dup(self.original_stderr_fd)
+        
+        # Redirect stderr to our pipe
+        os.dup2(self.write_fd, self.original_stderr_fd)
+        
+        # Start reader thread
+        self.reader_thread = threading.Thread(target=self._reader, daemon=True)
+        self.reader_thread.start()
+        self.buffer = ""
+        
+    def _reader(self):
+        """Read from pipe and write to both log file and original stderr"""
+        read_file = os.fdopen(self.read_fd, 'r', encoding='utf-8', errors='replace', buffering=1)  # Line buffered
+        original_stderr_file = os.fdopen(self.saved_stderr_fd, 'w', encoding='utf-8', buffering=1)
+        
+        while True:
+            try:
+                # Read a line at a time (more efficient)
+                line = read_file.readline()
+                if not line:
+                    break
+                
+                # Handle carriage returns - replace with newline for log file
+                log_line = line.replace('\r', '\n')
+                display_line = line
+                
+                # Write to log file (cleaned)
+                self.log_file_handle.write(log_line)
+                self.log_file_handle.flush()
+                
+                # Write original to stderr (with progress bars)
+                original_stderr_file.write(display_line)
+                original_stderr_file.flush()
+                
+                # Parse for metrics (only structured log lines)
+                if line.strip() and ('|' in line or 'METRIC' in line or 'Quantizing' in line):
+                    self.metrics_collector.parse_log_line(line.strip())
+            except (OSError, ValueError, BrokenPipeError):
+                break
+        
+        read_file.close()
+        original_stderr_file.close()
+    
+    def close(self):
+        """Close the interceptor"""
+        os.close(self.write_fd)
+        # Restore original stderr
+        os.dup2(self.saved_stderr_fd, self.original_stderr_fd)
+        os.close(self.saved_stderr_fd)
 
 # Metrics collector
 class MetricsCollector:
@@ -150,7 +214,10 @@ class MetricsCollector:
 
 metrics_collector = MetricsCollector(metrics_csv)
 
-# Custom stdout/stderr wrapper to capture all output
+# Create file descriptor-level stderr interceptor (catches structlog output)
+fd_interceptor = FDStderrInterceptor(log_file_handle, metrics_collector)
+
+# Custom stdout wrapper to capture stdout output
 class TeeOutput:
     def __init__(self, *files):
         self.files = files
@@ -285,15 +352,13 @@ class StructuredLogHandler(logging.Handler):
         # Parse for metrics
         self.metrics_collector.parse_log_line(formatted)
 
-# Store original stdout/stderr before replacing
+# Store original stdout before replacing
 original_stdout = sys.stdout
-original_stderr = sys.stderr
 
-# Replace stdout/stderr to capture all output
+# Replace stdout to capture all output (stderr is handled by FD interceptor)
 tee_stdout = TeeOutput(log_file_handle)
-tee_stderr = TeeError(log_file_handle)
 sys.stdout = tee_stdout
-sys.stderr = tee_stderr
+# Note: stderr is intercepted at FD level by fd_interceptor, so we don't replace sys.stderr
 
 # Setup logging to both file and console (after stdout replacement so StreamHandler uses tee)
 logging.basicConfig(
@@ -649,11 +714,12 @@ tokenizer.save_pretrained(SAVE_DIR)
 
 # Flush all buffers before restoring
 tee_stdout.flush()
-tee_stderr.flush()
 
-# Restore original stdout/stderr before saving metrics (so summary prints correctly)
+# Close FD interceptor (this will restore original stderr)
+fd_interceptor.close()
+
+# Restore original stdout before saving metrics (so summary prints correctly)
 sys.stdout = original_stdout
-sys.stderr = original_stderr
 
 # Save metrics
 metrics_collector.save_csv()
