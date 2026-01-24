@@ -392,19 +392,61 @@ class StructuredLogHandler(logging.Handler):
 
 # Store original stdout before replacing
 original_stdout = sys.stdout
+original_stdout_fd = sys.stdout.fileno()
 
-# Replace stdout to capture all output (stderr is handled by FD interceptor)
+# Create a pipe for FD-level stdout interception
+stdout_read_fd, stdout_write_fd = os.pipe()
+saved_stdout_fd = os.dup(original_stdout_fd)
+original_stdout_file = os.fdopen(saved_stdout_fd, 'w', encoding='utf-8', buffering=1)
+
+# Redirect stdout FD to pipe (catches direct FD writes from structlog)
+os.dup2(stdout_write_fd, original_stdout_fd)
+
+# Store for cleanup
+_stdout_cleanup_vars = {
+    'write_fd': stdout_write_fd,
+    'saved_stdout_fd': saved_stdout_fd,
+    'original_stdout_fd': original_stdout_fd,
+    'original_stdout_file': original_stdout_file
+}
+
+# Start thread to read from stdout pipe
+def stdout_pipe_reader():
+    read_file = os.fdopen(stdout_read_fd, 'r', encoding='utf-8', errors='replace', buffering=1)
+    while True:
+        try:
+            line = read_file.readline()
+            if not line:
+                break
+            # Write to original stdout
+            original_stdout_file.write(line)
+            original_stdout_file.flush()
+            # Write to log file (cleaned)
+            log_line = line.replace('\r', '\n')
+            log_file_handle.write(log_line)
+            log_file_handle.flush()
+            # Parse for metrics
+            if line.strip() and ('|' in line or 'METRIC' in line or 'Quantizing' in line):
+                metrics_collector.parse_log_line(line.strip())
+        except (OSError, ValueError, BrokenPipeError):
+            break
+    read_file.close()
+
+stdout_pipe_thread = threading.Thread(target=stdout_pipe_reader, daemon=True)
+stdout_pipe_thread.start()
+
+# Also create TeeOutput for sys.stdout writes (Python-level)
 tee_stdout = TeeOutput(log_file_handle)
-sys.stdout = tee_stdout
-# Note: stderr is intercepted at FD level by fd_interceptor, so we don't replace sys.stderr
+# Note: We don't replace sys.stdout since FD-level intercept handles it
 
-# Setup logging to both file and console (after stdout replacement so StreamHandler uses tee)
+# Setup logging to both file and console
+# Note: stdout FD is now redirected to pipe, so writes go through our interceptor
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(name)s | %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(log_file, mode='w'),
-        logging.StreamHandler(sys.stdout)  # This will now use our tee wrapper
+        logging.StreamHandler(original_stdout_file)  # Use the original stdout (bypasses FD interception)
     ]
 )
 
@@ -754,10 +796,13 @@ tokenizer.save_pretrained(SAVE_DIR)
 tee_stdout.flush()
 stderr_wrapper.flush()
 
-# Close pipe (this will cause pipe_reader to exit)
+# Close stderr pipe (this will cause pipe_reader to exit)
 os.close(_stderr_cleanup_vars['write_fd'])
 
-# Wait a moment for pipe reader to finish
+# Close stdout pipe (this will cause stdout_pipe_reader to exit)
+os.close(_stdout_cleanup_vars['write_fd'])
+
+# Wait a moment for pipe readers to finish
 import time
 time.sleep(0.5)
 
@@ -765,6 +810,11 @@ time.sleep(0.5)
 os.dup2(_stderr_cleanup_vars['saved_stderr_fd'], _stderr_cleanup_vars['original_stderr_fd'])
 os.close(_stderr_cleanup_vars['saved_stderr_fd'])
 _stderr_cleanup_vars['original_stderr_file'].close()
+
+# Restore original stdout FD
+os.dup2(_stdout_cleanup_vars['saved_stdout_fd'], _stdout_cleanup_vars['original_stdout_fd'])
+os.close(_stdout_cleanup_vars['saved_stdout_fd'])
+_stdout_cleanup_vars['original_stdout_file'].close()
 
 # Restore original stdout/stderr before saving metrics (so summary prints correctly)
 sys.stdout = original_stdout
