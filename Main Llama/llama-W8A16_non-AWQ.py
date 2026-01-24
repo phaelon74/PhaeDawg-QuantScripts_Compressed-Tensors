@@ -64,67 +64,59 @@ metrics_csv = log_dir / f"quantization_metrics_{timestamp}.csv"
 # Open log file for writing
 log_file_handle = open(log_file, 'w', encoding='utf-8')
 
-# File descriptor-level stderr interceptor to catch structlog output
-class FDStderrInterceptor:
-    def __init__(self, log_file_handle, metrics_collector):
+# Direct stderr wrapper to catch structlog output
+class StderrWrapper:
+    def __init__(self, log_file_handle, metrics_collector, original_stderr):
         self.log_file_handle = log_file_handle
         self.metrics_collector = metrics_collector
-        self.original_stderr_fd = sys.stderr.fileno()
-        self.original_stderr = sys.stderr
-        
-        # Create a pipe
-        self.read_fd, self.write_fd = os.pipe()
-        
-        # Save a copy of original stderr
-        self.saved_stderr_fd = os.dup(self.original_stderr_fd)
-        
-        # Redirect stderr to our pipe
-        os.dup2(self.write_fd, self.original_stderr_fd)
-        
-        # Start reader thread
-        self.reader_thread = threading.Thread(target=self._reader, daemon=True)
-        self.reader_thread.start()
+        self.original_stderr = original_stderr
         self.buffer = ""
         
-    def _reader(self):
-        """Read from pipe and write to both log file and original stderr"""
-        read_file = os.fdopen(self.read_fd, 'r', encoding='utf-8', errors='replace', buffering=1)  # Line buffered
-        original_stderr_file = os.fdopen(self.saved_stderr_fd, 'w', encoding='utf-8', buffering=1)
+    def write(self, data):
+        # Write to original stderr first (so user sees it)
+        self.original_stderr.write(data)
+        self.original_stderr.flush()
         
-        while True:
-            try:
-                # Read a line at a time (more efficient)
-                line = read_file.readline()
-                if not line:
-                    break
-                
-                # Handle carriage returns - replace with newline for log file
-                log_line = line.replace('\r', '\n')
-                display_line = line
-                
-                # Write to log file (cleaned)
-                self.log_file_handle.write(log_line)
-                self.log_file_handle.flush()
-                
-                # Write original to stderr (with progress bars)
-                original_stderr_file.write(display_line)
-                original_stderr_file.flush()
-                
-                # Parse for metrics (only structured log lines)
+        # Handle carriage returns - replace with newline for log file
+        log_data = data.replace('\r', '\n')
+        
+        # Write to log file
+        self.log_file_handle.write(log_data)
+        self.log_file_handle.flush()
+        
+        # Buffer and parse complete lines
+        self.buffer += log_data
+        if '\n' in self.buffer:
+            lines = self.buffer.split('\n')
+            self.buffer = lines[-1]  # Keep incomplete line
+            for line in lines[:-1]:
                 if line.strip() and ('|' in line or 'METRIC' in line or 'Quantizing' in line):
                     self.metrics_collector.parse_log_line(line.strip())
-            except (OSError, ValueError, BrokenPipeError):
-                break
-        
-        read_file.close()
-        original_stderr_file.close()
     
-    def close(self):
-        """Close the interceptor"""
-        os.close(self.write_fd)
-        # Restore original stderr
-        os.dup2(self.saved_stderr_fd, self.original_stderr_fd)
-        os.close(self.saved_stderr_fd)
+    def flush(self):
+        self.original_stderr.flush()
+        self.log_file_handle.flush()
+        
+        # Process any remaining buffer
+        if self.buffer.strip():
+            if '|' in self.buffer or 'METRIC' in self.buffer or 'Quantizing' in self.buffer:
+                self.metrics_collector.parse_log_line(self.buffer.strip())
+            self.buffer = ""
+    
+    def fileno(self):
+        return self.original_stderr.fileno()
+    
+    def isatty(self):
+        return self.original_stderr.isatty()
+    
+    def readable(self):
+        return False
+    
+    def writable(self):
+        return True
+    
+    def seekable(self):
+        return False
 
 # Metrics collector
 class MetricsCollector:
@@ -214,8 +206,54 @@ class MetricsCollector:
 
 metrics_collector = MetricsCollector(metrics_csv)
 
-# Create file descriptor-level stderr interceptor (catches structlog output)
-fd_interceptor = FDStderrInterceptor(log_file_handle, metrics_collector)
+# Wrap stderr to capture all output (including structlog)
+original_stderr = sys.stderr
+original_stderr_fd = sys.stderr.fileno()
+
+# Create a pipe for FD-level interception
+read_fd, write_fd = os.pipe()
+saved_stderr_fd = os.dup(original_stderr_fd)
+original_stderr_file = os.fdopen(saved_stderr_fd, 'w', encoding='utf-8', buffering=1)
+
+# Store for cleanup
+_stderr_cleanup_vars = {
+    'write_fd': write_fd,
+    'saved_stderr_fd': saved_stderr_fd,
+    'original_stderr_fd': original_stderr_fd,
+    'original_stderr_file': original_stderr_file
+}
+
+# Redirect stderr FD to pipe (catches direct FD writes from structlog)
+os.dup2(write_fd, original_stderr_fd)
+
+# Create wrapper for sys.stderr writes
+stderr_wrapper = StderrWrapper(log_file_handle, metrics_collector, original_stderr_file)
+sys.stderr = stderr_wrapper
+
+# Start thread to read from pipe (catches FD-level writes) and write to both log and stderr
+def pipe_reader():
+    read_file = os.fdopen(read_fd, 'r', encoding='utf-8', errors='replace', buffering=1)
+    while True:
+        try:
+            line = read_file.readline()
+            if not line:
+                break
+            # Write to original stderr
+            original_stderr_file.write(line)
+            original_stderr_file.flush()
+            # Write to log file (cleaned)
+            log_line = line.replace('\r', '\n')
+            log_file_handle.write(log_line)
+            log_file_handle.flush()
+            # Parse for metrics
+            if line.strip() and ('|' in line or 'METRIC' in line or 'Quantizing' in line):
+                metrics_collector.parse_log_line(line.strip())
+        except (OSError, ValueError, BrokenPipeError):
+            break
+    read_file.close()
+
+pipe_thread = threading.Thread(target=pipe_reader, daemon=True)
+pipe_thread.start()
 
 # Custom stdout wrapper to capture stdout output
 class TeeOutput:
@@ -714,12 +752,23 @@ tokenizer.save_pretrained(SAVE_DIR)
 
 # Flush all buffers before restoring
 tee_stdout.flush()
+stderr_wrapper.flush()
 
-# Close FD interceptor (this will restore original stderr)
-fd_interceptor.close()
+# Close pipe (this will cause pipe_reader to exit)
+os.close(_stderr_cleanup_vars['write_fd'])
 
-# Restore original stdout before saving metrics (so summary prints correctly)
+# Wait a moment for pipe reader to finish
+import time
+time.sleep(0.5)
+
+# Restore original stderr FD
+os.dup2(_stderr_cleanup_vars['saved_stderr_fd'], _stderr_cleanup_vars['original_stderr_fd'])
+os.close(_stderr_cleanup_vars['saved_stderr_fd'])
+_stderr_cleanup_vars['original_stderr_file'].close()
+
+# Restore original stdout/stderr before saving metrics (so summary prints correctly)
 sys.stdout = original_stdout
+sys.stderr = original_stderr
 
 # Save metrics
 metrics_collector.save_csv()
