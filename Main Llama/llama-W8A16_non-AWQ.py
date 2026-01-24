@@ -155,21 +155,50 @@ class TeeOutput:
     def __init__(self, *files):
         self.files = files
         self.original_stdout = sys.stdout
-        self.original_stderr = sys.stderr
+        self.buffer = ""  # Buffer for incomplete lines
         
     def write(self, data):
-        # Write to all files and original stdout
+        # Handle carriage returns (^M) from progress bars
+        # Progress bars use \r to overwrite the same line
+        # We want to keep the last complete line before \r sequences
+        display_data = data
+        
+        # For log file: replace \r with newline to preserve progress updates
+        # But for structured logs (with timestamps), keep them as-is
+        if '\r' in data:
+            # If this looks like a progress bar (no timestamp), replace \r with \n
+            # Otherwise, it's a structured log line, keep it
+            if '|' in data and any(x in data for x in ['INFO', 'WARNING', 'ERROR', 'METRIC']):
+                # Structured log - keep as-is but replace \r
+                log_data = data.replace('\r', '\n')
+            else:
+                # Progress bar - replace \r with \n
+                log_data = data.replace('\r', '\n')
+        else:
+            log_data = data
+        
+        # Write to log files
         for f in self.files:
-            f.write(data)
+            f.write(log_data)
             f.flush()
-        self.original_stdout.write(data)
+        # Write original to stdout (with progress bars)
+        self.original_stdout.write(display_data)
         self.original_stdout.flush()
         
-        # Parse for metrics
-        if data.strip():
-            metrics_collector.parse_log_line(data)
+        # Buffer and parse complete lines (only parse non-progress-bar lines)
+        self.buffer += log_data
+        if '\n' in self.buffer:
+            lines = self.buffer.split('\n')
+            self.buffer = lines[-1]  # Keep incomplete line in buffer
+            for line in lines[:-1]:
+                if line.strip() and ('|' in line or 'METRIC' in line or 'Quantizing' in line):
+                    metrics_collector.parse_log_line(line)
     
     def flush(self):
+        # Process any remaining buffer content
+        if self.buffer.strip():
+            metrics_collector.parse_log_line(self.buffer)
+            self.buffer = ""
         for f in self.files:
             f.flush()
         self.original_stdout.flush()
@@ -178,23 +207,83 @@ class TeeError:
     def __init__(self, *files):
         self.files = files
         self.original_stderr = sys.stderr
+        self.buffer = ""  # Buffer for incomplete lines
         
     def write(self, data):
-        # Write to all files and original stderr
+        # Handle carriage returns (^M) from progress bars
+        # Progress bars use \r to overwrite the same line
+        # We want to keep the last complete line before \r sequences
+        display_data = data
+        
+        # For log file: replace \r with newline to preserve progress updates
+        # But for structured logs (with timestamps), keep them as-is
+        if '\r' in data:
+            # If this looks like a progress bar (no timestamp), replace \r with \n
+            # Otherwise, it's a structured log line, keep it
+            if '|' in data and any(x in data for x in ['INFO', 'WARNING', 'ERROR', 'METRIC']):
+                # Structured log - keep as-is but replace \r
+                log_data = data.replace('\r', '\n')
+            else:
+                # Progress bar - replace \r with \n
+                log_data = data.replace('\r', '\n')
+        else:
+            log_data = data
+        
+        # Write to log files
         for f in self.files:
-            f.write(data)
+            f.write(log_data)
             f.flush()
-        self.original_stderr.write(data)
+        # Write original to stderr (with progress bars)
+        self.original_stderr.write(display_data)
         self.original_stderr.flush()
         
-        # Parse for metrics
-        if data.strip():
-            metrics_collector.parse_log_line(data)
+        # Buffer and parse complete lines (only parse non-progress-bar lines)
+        self.buffer += log_data
+        if '\n' in self.buffer:
+            lines = self.buffer.split('\n')
+            self.buffer = lines[-1]  # Keep incomplete line in buffer
+            for line in lines[:-1]:
+                if line.strip() and ('|' in line or 'METRIC' in line or 'Quantizing' in line):
+                    metrics_collector.parse_log_line(line)
     
     def flush(self):
+        # Process any remaining buffer content
+        if self.buffer.strip():
+            metrics_collector.parse_log_line(self.buffer)
+            self.buffer = ""
         for f in self.files:
             f.flush()
         self.original_stderr.flush()
+
+# Custom logging handler to capture llmcompressor structured logs
+class StructuredLogHandler(logging.Handler):
+    def __init__(self, log_file_handle, metrics_collector):
+        super().__init__()
+        self.log_file_handle = log_file_handle
+        self.metrics_collector = metrics_collector
+        
+    def emit(self, record):
+        # Format the log record - preserve original format from llmcompressor
+        msg = record.getMessage()
+        
+        # If it's a structured log (has timestamp format), preserve it
+        if hasattr(record, 'created'):
+            # Try to match llmcompressor's format: timestamp | logger | level - message
+            timestamp = datetime.fromtimestamp(record.created).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
+            formatted = f"{timestamp}+0000 | {record.name} | {record.levelname} - {msg}"
+        else:
+            formatted = f"{record.name} | {record.levelname} - {msg}"
+        
+        # Write to log file
+        self.log_file_handle.write(formatted + '\n')
+        self.log_file_handle.flush()
+        
+        # Also write to original stdout so user sees it (but don't double-write through tee)
+        if sys.stdout != tee_stdout:
+            print(formatted)
+        
+        # Parse for metrics
+        self.metrics_collector.parse_log_line(formatted)
 
 # Store original stdout/stderr before replacing
 original_stdout = sys.stdout
@@ -216,9 +305,24 @@ logging.basicConfig(
     ]
 )
 
-# Configure llmcompressor logging
-logging.getLogger('llmcompressor').setLevel(logging.INFO)
-logging.getLogger('compressed_tensors').setLevel(logging.INFO)
+# Configure llmcompressor logging and add custom handler
+llmcompressor_logger = logging.getLogger('llmcompressor')
+llmcompressor_logger.setLevel(logging.INFO)
+llmcompressor_logger.propagate = False  # Don't propagate to root logger
+llmcompressor_logger.addHandler(StructuredLogHandler(log_file_handle, metrics_collector))
+
+compressed_tensors_logger = logging.getLogger('compressed_tensors')
+compressed_tensors_logger.setLevel(logging.INFO)
+compressed_tensors_logger.propagate = False
+compressed_tensors_logger.addHandler(StructuredLogHandler(log_file_handle, metrics_collector))
+
+# Also capture any sub-loggers
+for logger_name in ['llmcompressor.modifiers', 'llmcompressor.modifiers.quantization', 
+                    'llmcompressor.modifiers.quantization.gptq', 'compress_modules', 'compress']:
+    sub_logger = logging.getLogger(logger_name)
+    sub_logger.setLevel(logging.INFO)
+    sub_logger.propagate = False
+    sub_logger.addHandler(StructuredLogHandler(log_file_handle, metrics_collector))
 
 logger = logging.getLogger(__name__)
 
@@ -542,6 +646,10 @@ oneshot(
 SAVE_DIR = output_path
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
+
+# Flush all buffers before restoring
+tee_stdout.flush()
+tee_stderr.flush()
 
 # Restore original stdout/stderr before saving metrics (so summary prints correctly)
 sys.stdout = original_stdout
