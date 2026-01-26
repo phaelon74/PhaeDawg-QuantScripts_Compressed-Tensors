@@ -4,6 +4,7 @@ import logging
 import sys
 import os
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 import csv
@@ -792,31 +793,63 @@ SAVE_DIR = output_path
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 
-# Flush all buffers before restoring
-tee_stdout.flush()
-stderr_wrapper.flush()
+# Cleanup FD interception safely
+def safe_cleanup():
+    """Safely restore stdout/stderr file descriptors"""
+    # Flush all buffers
+    try:
+        tee_stdout.flush()
+    except Exception:
+        pass
+    try:
+        stderr_wrapper.flush()
+    except Exception:
+        pass
+    
+    # Close write ends of pipes (causes readers to exit)
+    try:
+        os.close(_stderr_cleanup_vars['write_fd'])
+    except OSError:
+        pass
+    try:
+        os.close(_stdout_cleanup_vars['write_fd'])
+    except OSError:
+        pass
+    
+    # Wait for pipe readers to finish
+    time.sleep(0.5)
+    
+    # Restore stderr FD
+    try:
+        os.dup2(_stderr_cleanup_vars['saved_stderr_fd'], _stderr_cleanup_vars['original_stderr_fd'])
+    except OSError:
+        pass
+    try:
+        os.close(_stderr_cleanup_vars['saved_stderr_fd'])
+    except OSError:
+        pass
+    try:
+        _stderr_cleanup_vars['original_stderr_file'].close()
+    except Exception:
+        pass
+    
+    # Restore stdout FD
+    try:
+        os.dup2(_stdout_cleanup_vars['saved_stdout_fd'], _stdout_cleanup_vars['original_stdout_fd'])
+    except OSError:
+        pass
+    try:
+        os.close(_stdout_cleanup_vars['saved_stdout_fd'])
+    except OSError:
+        pass
+    try:
+        _stdout_cleanup_vars['original_stdout_file'].close()
+    except Exception:
+        pass
 
-# Close stderr pipe (this will cause pipe_reader to exit)
-os.close(_stderr_cleanup_vars['write_fd'])
+safe_cleanup()
 
-# Close stdout pipe (this will cause stdout_pipe_reader to exit)
-os.close(_stdout_cleanup_vars['write_fd'])
-
-# Wait a moment for pipe readers to finish
-import time
-time.sleep(0.5)
-
-# Restore original stderr FD
-os.dup2(_stderr_cleanup_vars['saved_stderr_fd'], _stderr_cleanup_vars['original_stderr_fd'])
-os.close(_stderr_cleanup_vars['saved_stderr_fd'])
-_stderr_cleanup_vars['original_stderr_file'].close()
-
-# Restore original stdout FD
-os.dup2(_stdout_cleanup_vars['saved_stdout_fd'], _stdout_cleanup_vars['original_stdout_fd'])
-os.close(_stdout_cleanup_vars['saved_stdout_fd'])
-_stdout_cleanup_vars['original_stdout_file'].close()
-
-# Restore original stdout/stderr before saving metrics (so summary prints correctly)
+# Restore original stdout/stderr objects
 sys.stdout = original_stdout
 sys.stderr = original_stderr
 
