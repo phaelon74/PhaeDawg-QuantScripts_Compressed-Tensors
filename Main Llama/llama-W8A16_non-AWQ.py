@@ -758,7 +758,9 @@ recipe = [
         ignore=["lm_head"],
         config_groups={"group_0": quant_scheme},
         dampening_frac=0.1,  # Standard GPTQ dampening (lower = more aggressive, higher = more stable)
-        actorder="dynamic",  # Activation order optimization: 'dynamic' orders by activation magnitude for better accuracy
+        actorder="static",   # Static ordering - best accuracy with no runtime cost, TP-compatible
+        # NOTE: "static" (default) and "group" work with tensor parallelism
+        # "dynamic" breaks TP because it requires runtime column reordering via g_idx
         block_size=128,      # Columns processed per pass (default: 128)
     ),
 ]
