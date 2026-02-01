@@ -59,53 +59,108 @@ except ImportError as e:
 #   - Weights: FP4 with per-block-16 scaling (FP8 scale factors)
 #   - Activations: FP16 or FP8 (depending on config)
 #   - Second-level FP32 scaling for larger dynamic range
+#   - IMPORTANT: FP4 format requires DYNAMIC block quantization
 #
 # Reference: https://developer.nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-precision-inference
 # ============================================================================
 
-# NVFP4 quantization configuration
-# FP4 uses (E2M1) format - 2 exponent bits, 1 mantissa bit
-NVFP4_CONFIG = {
-    "quant_cfg": {
-        # Weight quantization: FP4 with block-16 quantization
-        "*weight_quantizer": {
-            "num_bits": (2, 1),  # FP4 = E2M1 format
-            "block_sizes": {
-                -1: 16,  # Block size of 16 along last dimension
-                "type": "static",  # Static calibrated quantization
-            },
-            "enable": True,
-        },
-        # Input/activation quantization: Keep in higher precision
-        # NVFP4 typically uses FP16 activations for accuracy
-        "*input_quantizer": {
-            "enable": False,  # Disable activation quantization for W4A16 mode
-        },
-        # Skip quantization for specific layers (optional)
-        "*lm_head*": {"enable": False},
-        "*embed*": {"enable": False},
-    },
-    "algorithm": {"method": "max"},  # Max calibration for scale factors
-}
 
-# Alternative: NVFP4 with FP8 activations (W4A8) - more aggressive
-NVFP4_W4A8_CONFIG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),  # FP4 = E2M1
-            "block_sizes": {-1: 16, "type": "static"},
-            "enable": True,
+def get_nvfp4_config(skip_layers: list[str] = None):
+    """
+    Get NVFP4 quantization config, trying predefined configs first.
+    
+    ModelOpt FP4 requires dynamic block quantization (not static).
+    """
+    # Try to use predefined NVFP4 config if available
+    predefined_configs = [
+        "NVFP4_DEFAULT_CFG",
+        "FP4_DEFAULT_CFG",
+        "NVFP4_AWQ_CFG",
+        "FP4_AWQ_CFG",
+    ]
+    
+    for config_name in predefined_configs:
+        if hasattr(mtq, config_name):
+            print(f"Using predefined config: mtq.{config_name}")
+            config = getattr(mtq, config_name).copy()
+            # Add skip layers if specified
+            if skip_layers:
+                for pattern in skip_layers:
+                    config["quant_cfg"][f"*{pattern}*"] = {"enable": False}
+            return config
+    
+    # Fall back to custom config
+    # FP4 (E2M1) requires DYNAMIC block quantization per ModelOpt validation
+    print("Using custom NVFP4 config (dynamic block quantization)")
+    
+    config = {
+        "quant_cfg": {
+            # Weight quantization: FP4 with dynamic block-16 quantization
+            "*weight_quantizer": {
+                "num_bits": (2, 1),  # FP4 = E2M1 format
+                "block_sizes": {
+                    "-1": 16,  # Block size of 16 along last dimension (string key)
+                    "type": "dynamic",  # FP4 requires dynamic quantization
+                },
+                "enable": True,
+            },
+            # Input/activation quantization: Keep in higher precision (W4A16)
+            "*input_quantizer": {
+                "enable": False,
+            },
+            # Skip quantization for specific layers
+            "*lm_head*": {"enable": False},
+            "*embed*": {"enable": False},
         },
-        "*input_quantizer": {
-            "num_bits": (4, 3),  # FP8 = E4M3
-            "block_sizes": {-1: None, "type": "dynamic"},  # Per-token dynamic
-            "enable": True,
+        "algorithm": {"method": "max"},
+    }
+    
+    # Add additional skip layers
+    if skip_layers:
+        for pattern in skip_layers:
+            config["quant_cfg"][f"*{pattern}*"] = {"enable": False}
+    
+    return config
+
+
+def get_nvfp4_w4a8_config(skip_layers: list[str] = None):
+    """
+    Get NVFP4 W4A8 config (FP4 weights + FP8 activations).
+    
+    More aggressive quantization for maximum performance.
+    """
+    config = {
+        "quant_cfg": {
+            "*weight_quantizer": {
+                "num_bits": (2, 1),  # FP4 = E2M1
+                "block_sizes": {"-1": 16, "type": "dynamic"},
+                "enable": True,
+            },
+            "*input_quantizer": {
+                "num_bits": (4, 3),  # FP8 = E4M3
+                "block_sizes": {"-1": None, "type": "dynamic"},  # Per-token dynamic
+                "enable": True,
+            },
+            "*lm_head*": {"enable": False},
+            "*embed*": {"enable": False},
         },
-        "*lm_head*": {"enable": False},
-        "*embed*": {"enable": False},
-    },
-    "algorithm": {"method": "max"},
-}
+        "algorithm": {"method": "max"},
+    }
+    
+    if skip_layers:
+        for pattern in skip_layers:
+            config["quant_cfg"][f"*{pattern}*"] = {"enable": False}
+    
+    return config
+
+
+def list_available_quant_configs():
+    """List all available quantization configs in ModelOpt."""
+    configs = []
+    for name in dir(mtq):
+        if name.endswith("_CFG") and name.isupper():
+            configs.append(name)
+    return configs
 
 
 # ============================================================================
@@ -447,8 +502,28 @@ Examples:
         default=None,
         help="Additional layer patterns to skip quantization (e.g., 'gate' 'router')",
     )
+    parser.add_argument(
+        "--list_configs",
+        action="store_true",
+        help="List available ModelOpt quantization configs and exit",
+    )
     
     args = parser.parse_args()
+    
+    # ========================================================================
+    # List Configs Mode
+    # ========================================================================
+    if args.list_configs:
+        print("\nAvailable ModelOpt Quantization Configs:")
+        print("=" * 50)
+        configs = list_available_quant_configs()
+        for cfg in sorted(configs):
+            print(f"  - mtq.{cfg}")
+        print("=" * 50)
+        print("\nTo use a predefined config, ModelOpt will auto-detect:")
+        print("  NVFP4_DEFAULT_CFG, FP4_DEFAULT_CFG, NVFP4_AWQ_CFG, etc.")
+        print("\nIf none found, a custom dynamic FP4 config will be used.")
+        sys.exit(0)
     
     # ========================================================================
     # Setup
@@ -533,18 +608,21 @@ Examples:
     # ========================================================================
     print("\nConfiguring NVFP4 quantization...")
     
+    # List available configs for debugging
+    available_configs = list_available_quant_configs()
+    print(f"Available ModelOpt configs: {available_configs}")
+    
     # Select configuration
     if args.w4a8:
-        quant_config = NVFP4_W4A8_CONFIG.copy()
+        quant_config = get_nvfp4_w4a8_config(skip_layers=args.skip_layers)
         print("Using W4A8 configuration (FP4 weights + FP8 activations)")
     else:
-        quant_config = NVFP4_CONFIG.copy()
+        quant_config = get_nvfp4_config(skip_layers=args.skip_layers)
         print("Using W4A16 configuration (FP4 weights + FP16 activations)")
     
-    # Add any additional skip layers
+    # Log skip layers
     if args.skip_layers:
         for pattern in args.skip_layers:
-            quant_config["quant_cfg"][f"*{pattern}*"] = {"enable": False}
             print(f"  Skipping quantization for: *{pattern}*")
     
     # ========================================================================
