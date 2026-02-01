@@ -1,0 +1,235 @@
+# =====================================================
+# NVFP4 Calibration Dataset Configuration
+# For use with NVIDIA Model Optimizer (ModelOpt)
+# =====================================================
+#
+# This configuration file specifies calibration datasets
+# for NVFP4 quantization. The script will:
+#   1. Load each dataset from HuggingFace
+#   2. Sample proportionally based on weights
+#   3. Format text using the specified formatter
+#   4. Tokenize and truncate to max_seq_len
+#
+# =====================================================
+
+# =====================================================
+# Calibration Settings
+# =====================================================
+calibration:
+  max_samples: 512           # Total samples across all datasets
+  max_seq_len: 2048          # Maximum sequence length
+  seed: 42                   # Random seed for reproducibility
+  batch_size: 1              # Batch size for calibration forward passes
+
+# =====================================================
+# Dataset Sources
+# Balanced blend optimized for general-purpose + creative tasks
+# =====================================================
+#
+# Category Summary (Total: 512 samples)
+# -----------------------------------------------------
+# Narrative Fiction (100 samples - ~20%)        [CREATIVE]
+# Roleplay / Character (100 samples - ~20%)     [CREATIVE]
+# Dialogue & Conversation (90 samples - ~18%)   [SHARED]
+# World-building / Scenarios (60 samples - ~12%) [CREATIVE]
+# Genre-specific (50 samples - ~10%)            [CREATIVE]
+# General Capability (60 samples - ~12%)        [CRITICAL]
+# Multilingual (12 samples - ~2%)               [BREADTH]
+# Poetry & Prose (20 samples - ~4%)             [STYLE]
+# Code & Technical (20 samples - ~4%)           [CAPABILITY]
+# =====================================================
+
+datasets:
+  # ================================================
+  # Narrative Fiction - ~20% (100 samples)
+  # Core storytelling, plot, character arcs
+  # ================================================
+  
+  - name: opus_writing_prompts
+    path: Gryphe/Opus-WritingPrompts
+    split: train
+    weight: 0.08
+    formatter: sharegpt
+    columns: [conversations]
+
+  - name: community_writing_prompts
+    path: euclaise/writingprompts
+    split: train
+    weight: 0.07
+    formatter: prompt_answer
+    columns: [prompt, story]
+
+  - name: gutenberg_fiction
+    path: sam-paech/gutenberg3-generalfiction-scifi-fantasy-romance-adventure-dpo
+    split: train
+    weight: 0.05
+    formatter: chat_completion
+    columns: [chosen]
+
+  # ================================================
+  # Roleplay / Character - ~20% (100 samples)
+  # Character-based interaction and persona play
+  # ================================================
+  
+  - name: stheno_roleplay
+    path: anthracite-org/stheno-filtered-v1.1
+    split: train
+    weight: 0.10
+    formatter: sharegpt
+    columns: [conversations]
+
+  - name: kalo_opus_instruct
+    path: anthracite-org/kalo-opus-instruct-22k-no-refusal
+    split: train
+    weight: 0.08
+    formatter: sharegpt
+    columns: [conversations]
+
+  - name: opus_writing_rp
+    path: Gryphe/Opus-WritingPrompts
+    split: train
+    weight: 0.02
+    formatter: sharegpt
+    columns: [conversations]
+
+  # ================================================
+  # Dialogue & Conversation - ~18% (90 samples)
+  # Natural speech, character voice
+  # ================================================
+  
+  - name: ultrachat
+    path: stingning/ultrachat
+    split: train
+    weight: 0.08
+    formatter: chat_completion
+    columns: [data]
+
+  - name: persona_chat
+    path: awsaf49/persona-chat
+    split: train
+    weight: 0.06
+    formatter: chat_completion
+    columns: [persona, conversation]
+
+  - name: ultrachat_200k
+    path: HuggingFaceH4/ultrachat_200k
+    split: train_sft
+    weight: 0.04
+    formatter: chat_completion
+    columns: [messages]
+
+  # ================================================
+  # World-building & Scenarios - ~12% (60 samples)
+  # Setting creation, atmosphere, scene-setting
+  # ================================================
+  
+  - name: claude_writing
+    path: anthracite-org/nopm_claude_writing_fixed
+    split: train
+    weight: 0.06
+    formatter: sharegpt
+    columns: [conversations]
+
+  - name: prosemaxx_adventure
+    path: PocketDoc/Dans-Prosemaxx-Adventure
+    split: train
+    weight: 0.06
+    formatter: sharegpt
+    columns: [conversations]
+
+  # ================================================
+  # Genre-specific Prompts - ~10% (50 samples)
+  # Fantasy, Sci-Fi, Horror, Romance, Mystery
+  # ================================================
+  
+  - name: gpt4o_writing
+    path: Gryphe/ChatGPT-4o-Writing-Prompts
+    split: train
+    weight: 0.06
+    formatter: prompt_answer
+    columns: [prompt, story]
+
+  - name: writing_aug
+    path: fabraz/writingPromptAug
+    split: train
+    weight: 0.04
+    formatter: prompt_answer
+    columns: [prompt, story]
+
+  # ================================================
+  # General Capability Preservation - ~12% (60 samples)
+  # Math, reasoning, instruction following
+  # CRITICAL for quantization stability
+  # ================================================
+  
+  - name: helpsteer
+    path: nvidia/HelpSteer
+    split: train
+    weight: 0.04
+    formatter: prompt_answer
+    columns: [prompt, response]
+
+  - name: open_platypus
+    path: garage-bAInd/Open-Platypus
+    split: train
+    weight: 0.03
+    formatter: prompt_answer
+    columns: [instruction, output]
+
+  - name: openmath
+    path: nvidia/OpenMathInstruct-2
+    split: train
+    weight: 0.02
+    formatter: prompt_answer
+    columns: [problem, generated_solution]
+    streaming: true
+
+  - name: dolly
+    path: databricks/databricks-dolly-15k
+    split: train
+    weight: 0.03
+    formatter: prompt_answer
+    columns: [instruction, response]
+
+  # ================================================
+  # Poetry & Prose Rhythm - ~4% (20 samples)
+  # Literary devices, sentence flow
+  # ================================================
+  
+  - name: poetry
+    path: merve/poetry
+    split: train
+    weight: 0.02
+    formatter: raw_text
+    columns: [content]
+
+  - name: quotes
+    path: Abirate/english_quotes
+    split: train
+    weight: 0.02
+    formatter: raw_text
+    columns: [quote]
+
+  # ================================================
+  # Code & Technical - ~4% (20 samples)
+  # Preserves code generation capability
+  # ================================================
+  
+  - name: code_instructions
+    path: iamtarun/python_code_instructions_18k_alpaca
+    split: train
+    weight: 0.04
+    formatter: prompt_answer
+    columns: [instruction, output]
+
+  # ================================================
+  # Multilingual - ~2% (12 samples)
+  # Language breadth for international content
+  # ================================================
+  
+  - name: multilingual
+    path: HuggingFaceH4/Multilingual-Thinking
+    split: train
+    weight: 0.02
+    formatter: raw_text
+    columns: [user]
