@@ -6,9 +6,13 @@
 # This configuration file specifies calibration datasets
 # for NVFP4 quantization. The script will:
 #   1. Load each dataset from HuggingFace
-#   2. Sample proportionally based on weights
+#   2. Sample proportionally based on weights (with oversampling)
 #   3. Format text using the specified formatter
 #   4. Tokenize and truncate to max_seq_len
+#   5. Filter short samples and trim to exact target count
+#
+# Oversampling ensures we always get the target sample count
+# even after filtering out short/empty samples.
 #
 # =====================================================
 
@@ -16,10 +20,13 @@
 # Calibration Settings
 # =====================================================
 calibration:
-  max_samples: 512           # Total samples across all datasets
-  max_seq_len: 2048          # Maximum sequence length
+  max_samples: 512           # Target samples for calibration (after filtering)
+  max_seq_len: 2048          # Maximum sequence length for tokenization
   seed: 42                   # Random seed for reproducibility
   batch_size: 1              # Batch size for calibration forward passes
+  min_token_length: 32       # Filter out samples shorter than this (tokens)
+  oversample_ratio: 1.5      # Request 50% more samples to account for filtering
+                             # (samples are trimmed to max_samples after filtering)
 
 # =====================================================
 # Dataset Sources

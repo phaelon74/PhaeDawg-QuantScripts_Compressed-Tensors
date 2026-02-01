@@ -210,9 +210,129 @@ datasets:
     columns: [conversations]
 
 calibration:
-  max_samples: 512         # Total samples across all datasets
+  max_samples: 512         # Target samples for calibration (after filtering)
   max_seq_len: 2048        # Maximum sequence length for tokenization
   seed: 42                 # Random seed for reproducibility
+  min_token_length: 32     # Filter samples shorter than this (default: 32)
+  oversample_ratio: 1.5    # Request 50% more samples, trim after filtering
+```
+
+### Oversampling to Guarantee Sample Count
+
+The script uses **oversampling** to ensure you always get the target number of
+calibration samples, even after filtering out short/empty samples.
+
+**How it works:**
+1. Request `max_samples * oversample_ratio` samples from datasets (proportionally)
+2. Tokenize and filter out samples shorter than `min_token_length`
+3. Trim back to exactly `max_samples` (maintaining random order)
+
+**Example with default settings:**
+```
+Target: 512 samples
+Oversample ratio: 1.5x
+Requested: 768 samples
+After filtering: ~600 samples
+Final (trimmed): 512 samples
+```
+
+If filtering removes too many samples (more than oversample allows), the script
+will warn but continue with whatever samples are available.
+
+### HuggingFace Dataset Cache
+
+HuggingFace datasets are cached **system-wide** (not per-venv) in a shared location.
+Once downloaded, they're available to all Python environments.
+
+**Default cache locations:**
+
+| OS | Default Cache Path |
+|----|-------------------|
+| Linux | `~/.cache/huggingface/datasets/` |
+| macOS | `~/.cache/huggingface/datasets/` |
+| Windows | `C:\Users\<username>\.cache\huggingface\datasets\` |
+
+**To find your cache location:**
+```bash
+# Check current cache directory
+python -c "from datasets import config; print(config.HF_DATASETS_CACHE)"
+
+# List all cached datasets
+ls -la ~/.cache/huggingface/datasets/
+
+# See size of each cached dataset
+du -sh ~/.cache/huggingface/datasets/*
+```
+
+**Example output:**
+```
+1.2G  ~/.cache/huggingface/datasets/HuggingFaceH4___ultrachat_200k
+450M  ~/.cache/huggingface/datasets/Gryphe___opus-writingprompts
+2.1G  ~/.cache/huggingface/datasets/anthracite-org___stheno-filtered-v1.1
+```
+
+### Copying Cache Between Environments
+
+Since the cache is system-wide, you typically don't need to copy anything.
+However, if you have datasets cached in a different location:
+
+```bash
+# Copy entire HuggingFace cache from one location to another
+cp -r /path/to/old/venv/.cache/huggingface ~/.cache/huggingface
+
+# Or copy just the datasets folder
+cp -r /path/to/source/.cache/huggingface/datasets/* ~/.cache/huggingface/datasets/
+
+# Verify the copy worked
+ls ~/.cache/huggingface/datasets/
+```
+
+**To use a custom cache location:**
+```bash
+# Set environment variable before running
+export HF_DATASETS_CACHE="/path/to/your/cache"
+python quantize_nvfp4.py ...
+
+# Or add to .env file
+echo 'HF_DATASETS_CACHE=/path/to/your/cache' >> .env
+```
+
+### Using Local/Offline Datasets
+
+If you want to explicitly use datasets from a specific path:
+
+```yaml
+datasets:
+  # Use HuggingFace ID (will use cache automatically)
+  - name: ultrachat
+    path: HuggingFaceH4/ultrachat_200k
+    split: train_sft
+    weight: 0.5
+
+  # Or specify absolute path to local arrow files
+  - name: my_local_dataset
+    path: /absolute/path/to/dataset/folder
+    split: train
+    weight: 0.5
+```
+
+**To pre-download datasets for offline use:**
+```bash
+python -c "
+from datasets import load_dataset
+
+# This downloads and caches the dataset
+datasets_to_cache = [
+    ('HuggingFaceH4/ultrachat_200k', 'train_sft'),
+    ('Gryphe/Opus-WritingPrompts', 'train'),
+    ('anthracite-org/stheno-filtered-v1.1', 'train'),
+]
+
+for ds_name, split in datasets_to_cache:
+    print(f'Downloading {ds_name}...')
+    ds = load_dataset(ds_name, split=split)
+    print(f'  Cached {len(ds)} samples')
+"
 ```
 
 ### Formatter Types
@@ -249,9 +369,22 @@ python quantize_nvfp4.py \
   --dataset_yaml Datasets/SWRP_Default.yaml \
   --max_samples 1024 \
   --max_seq_len 4096 \
+  --oversample_ratio 1.5 \
   --batch_size 1 \
   --trust_remote_code
 ```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--max_samples` | 512 | Target calibration samples |
+| `--max_seq_len` | 2048 | Max tokens per sample |
+| `--oversample_ratio` | 1.5 | Request N times more samples to account for filtering |
+| `--batch_size` | 1 | Calibration batch size |
+| `--dtype` | auto | Model dtype (auto/float16/bfloat16) |
+| `--trust_remote_code` | false | Trust remote code for custom models |
+| `--w4a8` | false | Use W4A8 mode (FP4 weights + FP8 activations) |
+| `--skip_layers` | none | Layer patterns to skip quantizing |
+| `--list_configs` | false | List available ModelOpt configs and exit |
 
 ### Environment Variables
 

@@ -252,15 +252,21 @@ def load_calibration_dataset(
     tokenizer: AutoTokenizer,
     max_samples_override: Optional[int] = None,
     max_seq_len_override: Optional[int] = None,
+    oversample_ratio_override: Optional[float] = None,
 ) -> Dataset:
     """
     Load and prepare calibration dataset from YAML configuration.
+    
+    Uses oversampling to ensure we get the target number of samples after
+    filtering. Samples are requested at `max_samples * oversample_ratio`,
+    then trimmed back to `max_samples` after filtering.
     
     Args:
         yaml_path: Path to dataset configuration YAML
         tokenizer: Tokenizer for the model
         max_samples_override: Override max_samples from config
         max_seq_len_override: Override max_seq_len from config
+        oversample_ratio_override: Override oversample_ratio from config
     
     Returns:
         Dataset with tokenized samples ready for calibration
@@ -277,20 +283,31 @@ def load_calibration_dataset(
     max_samples = max_samples_override or calib_cfg.get("max_samples", 512)
     max_seq_len = max_seq_len_override or calib_cfg.get("max_seq_len", 2048)
     seed = calib_cfg.get("seed", 42)
+    min_token_length = calib_cfg.get("min_token_length", 32)
     
-    print(f"Max samples: {max_samples}")
+    # Oversample ratio: request more samples to account for filtering losses
+    # Default 1.5 means request 50% more samples than target
+    oversample_ratio = oversample_ratio_override or calib_cfg.get("oversample_ratio", 1.5)
+    
+    # Calculate oversampled target
+    oversample_target = int(max_samples * oversample_ratio)
+    
+    print(f"Target samples: {max_samples}")
+    print(f"Oversample ratio: {oversample_ratio}x (requesting {oversample_target} samples)")
     print(f"Max sequence length: {max_seq_len}")
+    print(f"Min token length filter: {min_token_length}")
     print(f"Random seed: {seed}")
     
     datasets_cfg = cfg.get("datasets", [])
     if not datasets_cfg:
         raise ValueError("No datasets specified in configuration")
     
-    # Load and sample datasets
+    # Load and sample datasets with oversampling
     all_samples = []
+    dataset_weights = []  # Track weights for proportional trimming later
     total_weight = sum(d.get("weight", 1.0) for d in datasets_cfg)
     
-    print(f"\nLoading {len(datasets_cfg)} datasets...")
+    print(f"\nLoading {len(datasets_cfg)} datasets (with {oversample_ratio}x oversampling)...")
     
     for ds_cfg in datasets_cfg:
         name = ds_cfg.get("name", ds_cfg["path"])
@@ -301,8 +318,8 @@ def load_calibration_dataset(
         columns = ds_cfg.get("columns", [])
         streaming = ds_cfg.get("streaming", False)
         
-        # Calculate samples for this dataset
-        n_samples = max(1, int(max_samples * weight))
+        # Calculate samples for this dataset using OVERSAMPLED target
+        n_samples = max(1, int(oversample_target * weight))
         
         print(f"  - {name}: {n_samples} samples (weight={weight:.2%})")
         
@@ -347,7 +364,7 @@ def load_calibration_dataset(
     
     # Concatenate all datasets
     combined = concatenate_datasets(all_samples)
-    print(f"\nTotal samples loaded: {len(combined)}")
+    print(f"\nTotal samples loaded (before filtering): {len(combined)}")
     
     # Tokenize
     print("Tokenizing samples...")
@@ -369,10 +386,27 @@ def load_calibration_dataset(
     )
     
     # Filter out very short sequences
-    min_length = 32
-    combined = combined.filter(lambda x: len(x["input_ids"]) >= min_length)
+    combined = combined.filter(lambda x: len(x["input_ids"]) >= min_token_length)
     
-    print(f"Final dataset size: {len(combined)} samples")
+    samples_after_filter = len(combined)
+    print(f"Samples after filtering (>={min_token_length} tokens): {samples_after_filter}")
+    
+    # Trim to exact target if we have enough samples
+    if samples_after_filter >= max_samples:
+        # Shuffle and take exactly max_samples to maintain randomness
+        combined = combined.shuffle(seed=seed)
+        combined = combined.select(range(max_samples))
+        print(f"Trimmed to target: {max_samples} samples")
+    elif samples_after_filter < max_samples:
+        # We don't have enough samples - warn but continue
+        shortfall = max_samples - samples_after_filter
+        shortfall_pct = (shortfall / max_samples) * 100
+        print(f"WARNING: Only {samples_after_filter} samples available "
+              f"(target: {max_samples}, shortfall: {shortfall} / {shortfall_pct:.1f}%)")
+        print(f"         Consider increasing oversample_ratio (current: {oversample_ratio}x) "
+              f"or adding more datasets")
+    
+    print(f"\nFinal calibration dataset: {len(combined)} samples")
     print(f"{'='*70}\n")
     
     return combined
@@ -465,6 +499,13 @@ Examples:
         type=int,
         default=None,
         help="Override max sequence length from YAML config",
+    )
+    parser.add_argument(
+        "--oversample_ratio",
+        type=float,
+        default=None,
+        help="Override oversample ratio from YAML config (default: 1.5). "
+             "Request this many times more samples to account for filtering losses.",
     )
     parser.add_argument(
         "--batch_size",
@@ -599,6 +640,7 @@ Examples:
         tokenizer,
         max_samples_override=args.max_samples,
         max_seq_len_override=args.max_seq_len,
+        oversample_ratio_override=args.oversample_ratio,
     )
     
     forward_loop = create_calibration_dataloader(calib_dataset, args.batch_size)
