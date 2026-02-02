@@ -42,6 +42,25 @@ except ImportError:
 try:
     import modelopt.torch.quantization as mtq
     from modelopt.torch.export import export_hf_checkpoint
+    import modelopt
+    
+    # Check ModelOpt version
+    modelopt_version = getattr(modelopt, "__version__", "unknown")
+    print(f"ModelOpt version: {modelopt_version}")
+    
+    # Warn if version is older than NVIDIA's recommended
+    try:
+        from packaging import version
+        if modelopt_version != "unknown":
+            current = version.parse(modelopt_version.split('+')[0].split('.dev')[0])
+            recommended = version.parse("0.35.0")
+            if current < recommended:
+                print(f"WARNING: ModelOpt version {modelopt_version} may be outdated.")
+                print(f"         NVIDIA uses v0.35.0+ for their official NVFP4 checkpoints.")
+                print(f"         Consider upgrading: pip install --upgrade nvidia-modelopt")
+    except Exception:
+        pass  # packaging might not be installed
+        
 except ImportError as e:
     print("ERROR: nvidia-modelopt is not installed.")
     print("Install with: pip install nvidia-modelopt")
@@ -777,6 +796,38 @@ Examples:
     else:  # nvfp4 (default)
         quant_config = get_nvfp4_config(skip_layers=args.skip_layers)
         print("Using NVFP4 W4A4 configuration (FP4 weights + FP4 activations)")
+    
+    # DIAGNOSTIC: Print the actual config being used
+    print("\n" + "=" * 70)
+    print("DIAGNOSTIC: Actual quantization config being applied:")
+    print("=" * 70)
+    import json
+    # Convert config to JSON-serializable format for printing
+    def config_to_str(cfg):
+        """Convert config to string, handling non-serializable types."""
+        result = {}
+        for k, v in cfg.items():
+            if isinstance(v, dict):
+                result[k] = config_to_str(v)
+            else:
+                result[str(k)] = str(v)
+        return result
+    
+    print(f"Algorithm: {quant_config.get('algorithm', 'NOT SET')}")
+    print("\nWeight quantizer config:")
+    weight_cfg = quant_config.get("quant_cfg", {}).get("*weight_quantizer", {})
+    print(f"  num_bits: {weight_cfg.get('num_bits', 'NOT SET')}")
+    print(f"  block_sizes: {weight_cfg.get('block_sizes', 'NOT SET')}")
+    print(f"  axis: {weight_cfg.get('axis', 'NOT SET')}")
+    print(f"  enable: {weight_cfg.get('enable', 'NOT SET')}")
+    
+    print("\nInput quantizer config:")
+    input_cfg = quant_config.get("quant_cfg", {}).get("*input_quantizer", {})
+    print(f"  num_bits: {input_cfg.get('num_bits', 'NOT SET')}")
+    print(f"  block_sizes: {input_cfg.get('block_sizes', 'NOT SET')}")
+    print(f"  axis: {input_cfg.get('axis', 'NOT SET')}")
+    print(f"  enable: {input_cfg.get('enable', 'NOT SET')}")
+    print("=" * 70 + "\n")
         print("  This matches NVIDIA's official NVFP4_DEFAULT_CFG")
     
     # Log skip layers
