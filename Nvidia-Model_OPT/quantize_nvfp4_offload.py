@@ -1,18 +1,29 @@
 #!/usr/bin/env python3
 """
-NVFP4 Quantization with NVIDIA Model Optimizer (ModelOpt)
+NVFP4 Quantization with NVIDIA Model Optimizer (ModelOpt) - CPU Offload Version
 
 This script quantizes a Hugging Face model to NVFP4 format using NVIDIA's
-TensorRT Model Optimizer. The resulting checkpoint is compatible with:
-  - TensorRT-LLM (Blackwell builds)
-  - vLLM with quantization="modelopt" or "modelopt_fp4"
-  - Other ModelOpt-compatible inference runtimes
+TensorRT Model Optimizer with CPU/disk offloading support for large models
+that don't fit in GPU memory.
+
+Key Features:
+  - CPU offloading for models larger than available VRAM
+  - Disk offloading for extremely large models
+  - Automatic memory management with accelerate
+  - Compatible with multi-GPU setups
 
 Usage:
-    python quantize_nvfp4.py \
-        --input_model meta-llama/Llama-3.3-70B-Instruct \
-        --output_model ./Llama-3.3-70B-NVFP4 \
-        --dataset_yaml Datasets/Dataset_Example.yaml
+    python quantize_nvfp4_offload.py \
+        --input_model meta-llama/Llama-3.1-405B-Instruct \
+        --output_model ./Llama-405B-NVFP4 \
+        --dataset_yaml Datasets/Dataset_Example.yaml \
+        --offload_folder ./offload_cache
+
+Memory Requirements (approximate):
+    - 8B model:   ~20 GB VRAM (no offload needed)
+    - 70B model:  ~160 GB (offload reduces to ~40 GB VRAM)
+    - 123B model: ~280 GB (offload reduces to ~60-80 GB VRAM)
+    - 405B model: ~900 GB (offload reduces to ~80-100 GB VRAM)
 
 Requirements:
     pip install nvidia-modelopt transformers datasets accelerate pyyaml
@@ -22,6 +33,7 @@ import argparse
 import gc
 import os
 import random
+import shutil
 import sys
 from pathlib import Path
 from typing import Callable, Iterator, Optional
@@ -48,98 +60,81 @@ except ImportError as e:
     print(f"Import error: {e}")
     sys.exit(1)
 
+# Import accelerate for offloading
+try:
+    from accelerate import infer_auto_device_map, init_empty_weights
+    from accelerate.utils import get_balanced_memory
+    ACCELERATE_AVAILABLE = True
+except ImportError:
+    ACCELERATE_AVAILABLE = False
+    print("WARNING: accelerate not installed. Offloading may not work optimally.")
+    print("Install with: pip install accelerate")
+
 
 # ============================================================================
 # NVFP4 Configuration
 # ============================================================================
-# NVFP4 uses FP4 (E2M1) format with block-16 quantization for BOTH weights
-# and activations. This provides ~4x compression vs FP16.
+# NVFP4 uses FP4 (E2M1) format with block-16 quantization for weights
+# and FP16/FP8 for activations. This provides ~3.5x compression vs FP16.
 #
-# Key characteristics (from NVIDIA's official config):
-#   - Weights: FP4 (E2M1) with per-block-16 scaling, FP8 (E4M3) scale factors
-#   - Activations: FP4 (E2M1) with per-block-16 dynamic quantization
-#   - scale_bits: (4, 3) = FP8 E4M3 format for scale factors
-#   - IMPORTANT: Both weights AND activations must be quantized for quality
+# Key characteristics:
+#   - Weights: FP4 with per-block-16 scaling (FP8 scale factors)
+#   - Activations: FP16 or FP8 (depending on config)
+#   - Second-level FP32 scaling for larger dynamic range
+#   - IMPORTANT: FP4 format requires DYNAMIC block quantization
 #
 # Reference: https://developer.nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-precision-inference
 # ============================================================================
 
-# Default layers that should NOT be quantized (from NVIDIA's ModelOpt)
-_default_disabled_quantizer_cfg = {
-    "nn.BatchNorm1d": {"*": {"enable": False}},
-    "nn.BatchNorm2d": {"*": {"enable": False}},
-    "nn.BatchNorm3d": {"*": {"enable": False}},
-    "nn.LeakyReLU": {"*": {"enable": False}},
-    "*lm_head*": {"enable": False},
-    "*proj_out.*": {"enable": False},  # In Whisper model, lm_head has key name proj_out
-    "*block_sparse_moe.gate*": {"enable": False},  # Skip the MOE router
-    "*router*": {"enable": False},  # Skip the MOE router
-    "*mlp.gate.*": {"enable": False},  # Skip the MOE router
-    "*mlp.shared_expert_gate.*": {"enable": False},  # Skip the MOE router
-    "*linear_attn.conv1d*": {"enable": False},
-    "*mixer.conv1d*": {"enable": False},
-    "*output_layer*": {"enable": False},
-    "output.*": {"enable": False},
-    "default": {"enable": False},
-}
-
 
 def get_nvfp4_config(skip_layers: list[str] = None):
     """
-    Get NVFP4 quantization config (W4A4 - FP4 weights + FP4 activations).
+    Get NVFP4 quantization config, trying predefined configs first.
     
-    This matches NVIDIA's official NVFP4_DEFAULT_CFG exactly.
-    Both weights AND activations are quantized to FP4 for best quality.
+    ModelOpt FP4 requires dynamic block quantization (not static).
     """
-    # Try to use predefined NVFP4 config if available (preferred)
+    # Try to use predefined NVFP4 config if available
     predefined_configs = [
         "NVFP4_DEFAULT_CFG",
-        "NVFP4_AWQ_LITE_CFG",
+        "FP4_DEFAULT_CFG",
+        "NVFP4_AWQ_CFG",
+        "FP4_AWQ_CFG",
     ]
     
     for config_name in predefined_configs:
         if hasattr(mtq, config_name):
             print(f"Using predefined config: mtq.{config_name}")
-            import copy
-            config = copy.deepcopy(getattr(mtq, config_name))
+            config = getattr(mtq, config_name).copy()
             # Add skip layers if specified
             if skip_layers:
                 for pattern in skip_layers:
                     config["quant_cfg"][f"*{pattern}*"] = {"enable": False}
             return config
     
-    # Fall back to custom config that EXACTLY matches NVIDIA's NVFP4_DEFAULT_CFG
-    print("Using custom NVFP4 config (matching NVIDIA's NVFP4_DEFAULT_CFG)")
+    # Fall back to custom config
+    # FP4 (E2M1) requires DYNAMIC block quantization per ModelOpt validation
+    print("Using custom NVFP4 config (dynamic block quantization)")
     
     config = {
         "quant_cfg": {
-            # Weight quantization: FP4 with dynamic block-16 quantization + FP8 scale factors
+            # Weight quantization: FP4 with dynamic block-16 quantization
             "*weight_quantizer": {
                 "num_bits": (2, 1),  # FP4 = E2M1 format
                 "block_sizes": {
-                    -1: 16,  # INTEGER key (not string!) - block size 16 along last dimension
+                    "-1": 16,  # Block size of 16 along last dimension (string key)
                     "type": "dynamic",  # FP4 requires dynamic quantization
-                    "scale_bits": (4, 3),  # CRITICAL: FP8 E4M3 format for scale factors
                 },
-                "axis": None,  # Required for block quantization
                 "enable": True,
             },
-            # Input/activation quantization: ALSO FP4 (W4A4 configuration)
-            # This is CRITICAL for NVFP4 quality - both weights AND activations must be quantized
+            # Input/activation quantization: Keep in higher precision (W4A16)
             "*input_quantizer": {
-                "num_bits": (2, 1),  # FP4 = E2M1 format
-                "block_sizes": {
-                    -1: 16,  # INTEGER key
-                    "type": "dynamic",
-                    "scale_bits": (4, 3),  # FP8 E4M3 for scale factors
-                },
-                "axis": None,
-                "enable": True,
+                "enable": False,
             },
-            # Include all default disabled layers
-            **_default_disabled_quantizer_cfg,
+            # Skip quantization for specific layers
+            "*lm_head*": {"enable": False},
+            "*embed*": {"enable": False},
         },
-        "algorithm": "max",  # Simple string, not dict
+        "algorithm": {"method": "max"},
     }
     
     # Add additional skip layers
@@ -154,84 +149,24 @@ def get_nvfp4_w4a8_config(skip_layers: list[str] = None):
     """
     Get NVFP4 W4A8 config (FP4 weights + FP8 activations).
     
-    This matches NVIDIA's W4A8_NVFP4_FP8_CFG - uses FP4 for weights, FP8 for activations.
-    Use this for slightly better accuracy at the cost of larger activation memory.
+    More aggressive quantization for maximum performance.
     """
-    # Try to use predefined config if available
-    if hasattr(mtq, "W4A8_NVFP4_FP8_CFG"):
-        print("Using predefined config: mtq.W4A8_NVFP4_FP8_CFG")
-        import copy
-        config = copy.deepcopy(mtq.W4A8_NVFP4_FP8_CFG)
-        if skip_layers:
-            for pattern in skip_layers:
-                config["quant_cfg"][f"*{pattern}*"] = {"enable": False}
-        return config
-    
     config = {
         "quant_cfg": {
             "*weight_quantizer": {
                 "num_bits": (2, 1),  # FP4 = E2M1
-                "block_sizes": {
-                    -1: 32,  # Note: W4A8 uses block size 32, not 16
-                    "type": "dynamic",
-                    "scale_bits": (4, 3),  # FP8 E4M3 scale factors
-                },
-                "axis": None,
+                "block_sizes": {"-1": 16, "type": "dynamic"},
                 "enable": True,
             },
             "*input_quantizer": {
-                "num_bits": (4, 3),  # FP8 = E4M3 (not FP4)
-                "axis": None,
+                "num_bits": (4, 3),  # FP8 = E4M3
+                "block_sizes": {"-1": None, "type": "dynamic"},  # Per-token dynamic
                 "enable": True,
             },
-            **_default_disabled_quantizer_cfg,
+            "*lm_head*": {"enable": False},
+            "*embed*": {"enable": False},
         },
-        "algorithm": "max",
-    }
-    
-    if skip_layers:
-        for pattern in skip_layers:
-            config["quant_cfg"][f"*{pattern}*"] = {"enable": False}
-    
-    return config
-
-
-def get_nvfp4_awq_config(skip_layers: list[str] = None):
-    """
-    Get NVFP4 with AWQ optimization (NVFP4_AWQ_LITE_CFG).
-    
-    AWQ (Activation-aware Weight Quantization) provides better accuracy
-    by finding optimal scaling factors that minimize quantization error.
-    This is recommended for best quality NVFP4 quantization.
-    """
-    # Try to use predefined config if available
-    if hasattr(mtq, "NVFP4_AWQ_LITE_CFG"):
-        print("Using predefined config: mtq.NVFP4_AWQ_LITE_CFG")
-        import copy
-        config = copy.deepcopy(mtq.NVFP4_AWQ_LITE_CFG)
-        if skip_layers:
-            for pattern in skip_layers:
-                config["quant_cfg"][f"*{pattern}*"] = {"enable": False}
-        return config
-    
-    # Fallback: same as NVFP4_DEFAULT but with AWQ algorithm
-    config = {
-        "quant_cfg": {
-            "*weight_quantizer": {
-                "num_bits": (2, 1),
-                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-                "axis": None,
-                "enable": True,
-            },
-            "*input_quantizer": {
-                "num_bits": (2, 1),
-                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-                "axis": None,
-                "enable": True,
-            },
-            **_default_disabled_quantizer_cfg,
-        },
-        "algorithm": "awq_lite",  # Use AWQ for better accuracy
+        "algorithm": {"method": "max"},
     }
     
     if skip_layers:
@@ -248,6 +183,83 @@ def list_available_quant_configs():
         if name.endswith("_CFG") and name.isupper():
             configs.append(name)
     return configs
+
+
+# ============================================================================
+# Memory Management Utilities
+# ============================================================================
+
+def get_memory_info():
+    """Get current memory usage information."""
+    info = {}
+    
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            allocated = torch.cuda.memory_allocated(i)
+            reserved = torch.cuda.memory_reserved(i)
+            total = props.total_memory
+            
+            info[f"cuda:{i}"] = {
+                "name": props.name,
+                "total_gb": total / 1e9,
+                "allocated_gb": allocated / 1e9,
+                "reserved_gb": reserved / 1e9,
+                "free_gb": (total - reserved) / 1e9,
+            }
+    
+    # CPU memory
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        info["cpu"] = {
+            "total_gb": mem.total / 1e9,
+            "available_gb": mem.available / 1e9,
+            "used_gb": mem.used / 1e9,
+            "percent": mem.percent,
+        }
+    except ImportError:
+        pass
+    
+    return info
+
+
+def print_memory_status(prefix=""):
+    """Print current memory status."""
+    info = get_memory_info()
+    
+    if prefix:
+        print(f"\n{prefix}")
+    
+    for device, stats in info.items():
+        if device.startswith("cuda"):
+            print(f"  {device} ({stats['name']}): "
+                  f"{stats['allocated_gb']:.1f} / {stats['total_gb']:.1f} GB "
+                  f"(free: {stats['free_gb']:.1f} GB)")
+        elif device == "cpu":
+            print(f"  CPU RAM: {stats['used_gb']:.1f} / {stats['total_gb']:.1f} GB "
+                  f"(available: {stats['available_gb']:.1f} GB, {stats['percent']:.0f}% used)")
+
+
+def estimate_model_memory(num_params: int, dtype: torch.dtype = torch.bfloat16) -> float:
+    """Estimate memory required for a model in GB."""
+    bytes_per_param = {
+        torch.float32: 4,
+        torch.float16: 2,
+        torch.bfloat16: 2,
+        torch.int8: 1,
+    }.get(dtype, 2)
+    
+    return (num_params * bytes_per_param) / 1e9
+
+
+def clear_memory():
+    """Aggressively clear GPU and CPU memory."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
 
 
 # ============================================================================
@@ -506,6 +518,9 @@ def create_calibration_dataloader(
     """
     Create a forward loop function for ModelOpt calibration.
     
+    For offloaded models, we need to be careful about device placement.
+    The model handles moving data to the correct device internally.
+    
     Args:
         dataset: Tokenized calibration dataset
         batch_size: Batch size for calibration
@@ -514,8 +529,14 @@ def create_calibration_dataloader(
         Forward loop function for mtq.quantize()
     """
     def forward_loop(model):
-        """Forward loop for calibration."""
-        device = next(model.parameters()).device
+        """Forward loop for calibration with offloading support."""
+        # Get the device of the first parameter to determine where to place inputs
+        # For offloaded models, this might be the first layer on GPU
+        first_param = next(model.parameters())
+        device = first_param.device
+        
+        # For models with device_map, the model handles device placement
+        # We just need to provide inputs on the correct initial device
         
         for i, example in enumerate(dataset):
             input_ids = torch.tensor([example["input_ids"]], device=device)
@@ -524,12 +545,24 @@ def create_calibration_dataloader(
                 try:
                     model(input_ids)
                 except Exception as e:
-                    print(f"Warning: Calibration step {i} failed: {e}")
-                    continue
+                    # For offloaded models, try with CPU and let the model handle it
+                    try:
+                        input_ids_cpu = torch.tensor([example["input_ids"]])
+                        model(input_ids_cpu)
+                    except Exception as e2:
+                        print(f"Warning: Calibration step {i} failed: {e2}")
+                        continue
             
             # Progress indicator
             if (i + 1) % 50 == 0:
                 print(f"  Calibration progress: {i + 1}/{len(dataset)} samples")
+                # Print memory status periodically for offloaded models
+                if (i + 1) % 100 == 0:
+                    print_memory_status("  Memory status:")
+            
+            # Periodic memory cleanup for large models
+            if (i + 1) % 100 == 0:
+                clear_memory()
         
         print(f"  Calibration complete: {len(dataset)} samples processed")
     
@@ -537,23 +570,42 @@ def create_calibration_dataloader(
 
 
 # ============================================================================
-# Main Quantization Flow
+# Main Quantization Flow with Offloading
 # ============================================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description="NVFP4 Quantization with NVIDIA Model Optimizer",
+        description="NVFP4 Quantization with NVIDIA Model Optimizer (CPU Offload Version)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage
-  python quantize_nvfp4.py --input_model ./llama-70b --output_model ./llama-70b-nvfp4 --dataset_yaml datasets.yaml
+  # Basic usage with offloading
+  python quantize_nvfp4_offload.py \\
+      --input_model ./llama-123b \\
+      --output_model ./llama-123b-nvfp4 \\
+      --dataset_yaml datasets.yaml \\
+      --offload_folder ./offload_cache
   
-  # With HuggingFace model
-  python quantize_nvfp4.py --input_model meta-llama/Llama-3.3-70B-Instruct --output_model ./nvfp4 --dataset_yaml datasets.yaml
+  # Large model with aggressive offloading
+  python quantize_nvfp4_offload.py \\
+      --input_model meta-llama/Llama-3.1-405B-Instruct \\
+      --output_model ./llama-405b-nvfp4 \\
+      --dataset_yaml datasets.yaml \\
+      --offload_folder /fast_ssd/offload \\
+      --max_gpu_memory 80GiB
   
-  # Override calibration settings
-  python quantize_nvfp4.py --input_model ./model --output_model ./nvfp4 --dataset_yaml cfg.yaml --max_samples 1024 --max_seq_len 4096
+  # Multi-GPU with offloading
+  python quantize_nvfp4_offload.py \\
+      --input_model ./model \\
+      --output_model ./nvfp4 \\
+      --dataset_yaml cfg.yaml \\
+      --offload_folder ./offload \\
+      --device_map auto
+
+Memory Notes:
+  - Offload folder should be on fast storage (SSD/NVMe)
+  - Expect ~50-100 GB disk usage for 123B+ models
+  - Use --max_gpu_memory to limit GPU usage and force offloading
         """,
     )
     
@@ -572,6 +624,11 @@ Examples:
         "--dataset_yaml",
         required=True,
         help="Path to YAML file specifying calibration datasets",
+    )
+    parser.add_argument(
+        "--offload_folder",
+        required=True,
+        help="Directory for CPU/disk offloading (should be on fast SSD)",
     )
     
     # Optional arguments
@@ -603,15 +660,24 @@ Examples:
     parser.add_argument(
         "--dtype",
         type=str,
-        default="auto",
-        choices=["auto", "float16", "bfloat16", "float32"],
-        help="Model dtype for loading (default: auto)",
+        default="bfloat16",
+        choices=["float16", "bfloat16", "float32"],
+        help="Model dtype for loading (default: bfloat16). "
+             "bfloat16 recommended for stability during offloading.",
     )
     parser.add_argument(
-        "--device_map",
+        "--max_gpu_memory",
         type=str,
-        default="cuda",
-        help="Device map for model loading (default: cuda)",
+        default=None,
+        help="Maximum GPU memory to use per GPU (e.g., '80GiB', '40GB'). "
+             "Lower values force more offloading to CPU.",
+    )
+    parser.add_argument(
+        "--max_cpu_memory",
+        type=str,
+        default=None,
+        help="Maximum CPU memory to use (e.g., '200GiB'). "
+             "Useful to leave headroom for other processes.",
     )
     parser.add_argument(
         "--trust_remote_code",
@@ -619,21 +685,9 @@ Examples:
         help="Trust remote code when loading model",
     )
     parser.add_argument(
-        "--mode",
-        type=str,
-        default="nvfp4",
-        choices=["nvfp4", "nvfp4_awq", "w4a8"],
-        help=(
-            "Quantization mode:\n"
-            "  nvfp4     - NVFP4 W4A4 (FP4 weights + FP4 activations) - matches NVIDIA's default\n"
-            "  nvfp4_awq - NVFP4 with AWQ optimization - best quality, recommended\n"
-            "  w4a8      - W4A8 (FP4 weights + FP8 activations) - slightly better accuracy"
-        ),
-    )
-    parser.add_argument(
         "--w4a8",
         action="store_true",
-        help="DEPRECATED: Use --mode w4a8 instead. Kept for backward compatibility.",
+        help="Use W4A8 mode (FP4 weights + FP8 activations) instead of W4A16",
     )
     parser.add_argument(
         "--skip_layers",
@@ -646,6 +700,17 @@ Examples:
         "--list_configs",
         action="store_true",
         help="List available ModelOpt quantization configs and exit",
+    )
+    parser.add_argument(
+        "--clean_offload",
+        action="store_true",
+        help="Remove offload folder after successful quantization",
+    )
+    parser.add_argument(
+        "--low_cpu_mem_usage",
+        action="store_true",
+        default=True,
+        help="Load model with low CPU memory usage (default: True)",
     )
     
     args = parser.parse_args()
@@ -669,27 +734,34 @@ Examples:
     # Setup
     # ========================================================================
     print("\n" + "=" * 70)
-    print("NVFP4 Quantization with NVIDIA Model Optimizer")
+    print("NVFP4 Quantization with CPU Offloading")
     print("=" * 70)
-    print(f"Input model:  {args.input_model}")
-    print(f"Output model: {args.output_model}")
-    print(f"Dataset YAML: {args.dataset_yaml}")
-    # Determine mode for display
-    display_mode = args.mode if not args.w4a8 else "w4a8"
-    mode_descriptions = {
-        "nvfp4": "W4A4 (FP4 weights + FP4 activations) - NVIDIA default",
-        "nvfp4_awq": "W4A4 + AWQ (FP4 weights + FP4 activations + AWQ optimization)",
-        "w4a8": "W4A8 (FP4 weights + FP8 activations)",
-    }
-    print(f"Mode:         {mode_descriptions.get(display_mode, display_mode)}")
+    print(f"Input model:     {args.input_model}")
+    print(f"Output model:    {args.output_model}")
+    print(f"Dataset YAML:    {args.dataset_yaml}")
+    print(f"Offload folder:  {args.offload_folder}")
+    print(f"Mode:            {'W4A8 (FP4 weights + FP8 activations)' if args.w4a8 else 'W4A16 (FP4 weights + FP16 activations)'}")
+    if args.max_gpu_memory:
+        print(f"Max GPU memory:  {args.max_gpu_memory}")
+    if args.max_cpu_memory:
+        print(f"Max CPU memory:  {args.max_cpu_memory}")
     print("=" * 70 + "\n")
+    
+    # Create offload folder
+    offload_path = Path(args.offload_folder)
+    offload_path.mkdir(parents=True, exist_ok=True)
+    print(f"Offload folder created: {offload_path.absolute()}")
     
     # Check CUDA availability
     if not torch.cuda.is_available():
-        print("WARNING: CUDA is not available. Calibration will be very slow on CPU.")
+        print("WARNING: CUDA is not available. This will be VERY slow.")
     else:
-        print(f"CUDA Device: {torch.cuda.get_device_name(0)}")
-        print(f"CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            print(f"CUDA Device {i}: {props.name}")
+            print(f"  Memory: {props.total_memory / 1e9:.1f} GB")
+    
+    print_memory_status("Initial memory status:")
     
     # Reduce CUDA memory fragmentation
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -711,31 +783,67 @@ Examples:
     print(f"Tokenizer loaded: vocab_size={tokenizer.vocab_size}")
     
     # ========================================================================
-    # Load Model
+    # Load Model with Offloading
     # ========================================================================
-    print("\nLoading model...")
+    print("\nLoading model with CPU/disk offloading...")
+    print("This may take a while for large models...")
     
     # Determine dtype
     torch_dtype = {
-        "auto": "auto",
         "float16": torch.float16,
         "bfloat16": torch.bfloat16,
         "float32": torch.float32,
     }[args.dtype]
     
+    # Build memory configuration for device_map="auto"
+    max_memory = {}
+    
+    if args.max_gpu_memory:
+        # Parse the memory string (e.g., "80GiB" or "80GB")
+        for i in range(torch.cuda.device_count()):
+            max_memory[i] = args.max_gpu_memory
+    
+    if args.max_cpu_memory:
+        max_memory["cpu"] = args.max_cpu_memory
+    
+    # If no memory limits specified, let accelerate figure it out
+    if not max_memory:
+        max_memory = None
+    
+    print(f"Loading with device_map='auto' and offloading to: {offload_path}")
+    if max_memory:
+        print(f"Memory limits: {max_memory}")
+    
+    # Load model with offloading
     model = AutoModelForCausalLM.from_pretrained(
         args.input_model,
         torch_dtype=torch_dtype,
-        device_map=args.device_map,
+        device_map="auto",
+        offload_folder=str(offload_path),
+        offload_state_dict=True,  # Offload state dict during loading
+        max_memory=max_memory,
         trust_remote_code=args.trust_remote_code,
+        low_cpu_mem_usage=args.low_cpu_mem_usage,
     )
     model.eval()
     
-    print(f"Model loaded: {model.config.model_type}")
+    # Print device map
+    print(f"\nModel loaded: {model.config.model_type}")
     print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
     
-    if torch.cuda.is_available():
-        print(f"GPU Memory Used: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+    # Show device distribution
+    if hasattr(model, "hf_device_map"):
+        device_map = model.hf_device_map
+        device_counts = {}
+        for layer, device in device_map.items():
+            device_str = str(device)
+            device_counts[device_str] = device_counts.get(device_str, 0) + 1
+        
+        print("\nDevice distribution:")
+        for device, count in sorted(device_counts.items()):
+            print(f"  {device}: {count} layers")
+    
+    print_memory_status("Memory after model loading:")
     
     # ========================================================================
     # Prepare Calibration Data
@@ -760,24 +868,13 @@ Examples:
     available_configs = list_available_quant_configs()
     print(f"Available ModelOpt configs: {available_configs}")
     
-    # Handle backward compatibility with --w4a8 flag
-    mode = args.mode
+    # Select configuration
     if args.w4a8:
-        print("WARNING: --w4a8 is deprecated. Use --mode w4a8 instead.")
-        mode = "w4a8"
-    
-    # Select configuration based on mode
-    if mode == "w4a8":
         quant_config = get_nvfp4_w4a8_config(skip_layers=args.skip_layers)
         print("Using W4A8 configuration (FP4 weights + FP8 activations)")
-    elif mode == "nvfp4_awq":
-        quant_config = get_nvfp4_awq_config(skip_layers=args.skip_layers)
-        print("Using NVFP4 + AWQ configuration (FP4 weights + FP4 activations + AWQ optimization)")
-        print("  NOTE: AWQ calibration takes longer but provides better accuracy")
-    else:  # nvfp4 (default)
+    else:
         quant_config = get_nvfp4_config(skip_layers=args.skip_layers)
-        print("Using NVFP4 W4A4 configuration (FP4 weights + FP4 activations)")
-        print("  This matches NVIDIA's official NVFP4_DEFAULT_CFG")
+        print("Using W4A16 configuration (FP4 weights + FP16 activations)")
     
     # Log skip layers
     if args.skip_layers:
@@ -789,12 +886,12 @@ Examples:
     # ========================================================================
     print("\n" + "=" * 70)
     print("Running calibration and quantization...")
+    print("This may take a long time for large offloaded models.")
     print("=" * 70 + "\n")
     
     # Clear cache before quantization
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        gc.collect()
+    clear_memory()
+    print_memory_status("Memory before quantization:")
     
     # Run ModelOpt quantization
     model = mtq.quantize(model, quant_config, forward_loop)
@@ -802,6 +899,8 @@ Examples:
     # Print quantization summary
     print("\nQuantization Summary:")
     mtq.print_quant_summary(model)
+    
+    print_memory_status("Memory after quantization:")
     
     # ========================================================================
     # Export Checkpoint
@@ -844,6 +943,24 @@ Examples:
         print("  ✗ No model weight files found!")
     
     # ========================================================================
+    # Cleanup
+    # ========================================================================
+    if args.clean_offload and offload_path.exists():
+        print(f"\nCleaning up offload folder: {offload_path}")
+        try:
+            shutil.rmtree(offload_path)
+            print("  ✓ Offload folder removed")
+        except Exception as e:
+            print(f"  ✗ Failed to remove offload folder: {e}")
+    else:
+        # Report offload folder size
+        if offload_path.exists():
+            offload_size = sum(f.stat().st_size for f in offload_path.rglob("*") if f.is_file())
+            print(f"\nOffload folder size: {offload_size / 1e9:.2f} GB")
+            print(f"  Use --clean_offload to remove after quantization")
+            print(f"  Or manually: rm -rf {offload_path}")
+    
+    # ========================================================================
     # Done
     # ========================================================================
     print("\n" + "=" * 70)
@@ -855,6 +972,8 @@ Examples:
     print("\nTo serve with vLLM:")
     print(f'  vllm serve {output_path} --quantization modelopt')
     print("=" * 70 + "\n")
+    
+    print_memory_status("Final memory status:")
 
 
 if __name__ == "__main__":

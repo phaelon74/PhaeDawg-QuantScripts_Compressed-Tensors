@@ -19,6 +19,9 @@ The resulting checkpoint is compatible with:
 - [Installation](#installation)
 - [Dataset Configuration](#dataset-configuration)
 - [Usage](#usage)
+  - [Basic Usage](#basic-usage)
+  - [Advanced Options](#advanced-options)
+  - [CPU Offloading for Large Models](#cpu-offloading-for-large-models)
 - [Deployment](#deployment)
 - [Troubleshooting](#troubleshooting)
 - [References](#references)
@@ -63,9 +66,15 @@ NVIDIA Blackwell GPUs that provides:
 
 ### Minimum VRAM
 
-- **8B models**: 24GB+ (single GPU)
-- **70B models**: 48GB+ or multi-GPU
-- **200B+ models**: Multi-GPU with sequential offloading
+| Model Size | Standard Script | With CPU Offloading |
+|------------|-----------------|---------------------|
+| **8B** | 24 GB | Not needed |
+| **70B** | 160 GB | ~40-60 GB |
+| **123B** | 280-300 GB | ~60-80 GB |
+| **405B** | 900 GB | ~80-100 GB |
+
+> **Tip:** Use `quantize_nvfp4_offload.py` when your GPU VRAM is insufficient.
+> See [CPU Offloading for Large Models](#cpu-offloading-for-large-models) below.
 
 ---
 
@@ -385,6 +394,66 @@ python quantize_nvfp4.py \
 | `--w4a8` | false | Use W4A8 mode (FP4 weights + FP8 activations) |
 | `--skip_layers` | none | Layer patterns to skip quantizing |
 | `--list_configs` | false | List available ModelOpt configs and exit |
+
+### CPU Offloading for Large Models
+
+For models larger than your available VRAM (e.g., 123B+ models on a single GPU),
+use the offloading version of the script:
+
+```bash
+python quantize_nvfp4_offload.py \
+  --input_model ./Behemoth-R1-123B-v2 \
+  --output_model ./Behemoth-R1-123B-v2-NVFP4 \
+  --dataset_yaml Datasets/SWRP_Default.yaml \
+  --offload_folder ./offload_cache
+```
+
+#### Offload Script Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--offload_folder` | **required** | Directory for CPU/disk offloading (use fast SSD) |
+| `--max_gpu_memory` | auto | Limit GPU memory per device (e.g., "80GiB") |
+| `--max_cpu_memory` | auto | Limit CPU memory (e.g., "200GiB") |
+| `--clean_offload` | false | Delete offload folder after quantization |
+
+#### Advanced Offloading Examples
+
+```bash
+# 123B model with limited GPU memory
+python quantize_nvfp4_offload.py \
+  --input_model ./123B_model \
+  --output_model ./123B_nvfp4 \
+  --dataset_yaml Datasets/SWRP_Default.yaml \
+  --offload_folder /fast_nvme/offload \
+  --max_gpu_memory 80GiB
+
+# Very large model (405B) - aggressive offloading
+python quantize_nvfp4_offload.py \
+  --input_model meta-llama/Llama-3.1-405B-Instruct \
+  --output_model ./405B_nvfp4 \
+  --dataset_yaml Datasets/SWRP_Default.yaml \
+  --offload_folder /fast_nvme/offload \
+  --max_gpu_memory 60GiB \
+  --max_cpu_memory 300GiB \
+  --clean_offload
+```
+
+#### Offload Performance Tips
+
+1. **Use fast storage**: NVMe SSD is strongly recommended for `--offload_folder`
+2. **Ensure sufficient disk space**: ~50-100 GB for 123B+ models
+3. **More RAM = faster**: CPU offloading uses system RAM before disk
+4. **Lower GPU limit = slower**: More offloading means more data transfer
+5. **Expect longer runtime**: Offloading adds significant overhead (2-5x slower)
+
+#### Estimated Quantization Time (123B model)
+
+| Configuration | Approximate Time |
+|---------------|------------------|
+| Full GPU (300GB+ VRAM) | ~30-60 min |
+| CPU offload (100GB VRAM) | ~2-4 hours |
+| Heavy offload (60GB VRAM) | ~6-12 hours |
 
 ### Environment Variables
 
