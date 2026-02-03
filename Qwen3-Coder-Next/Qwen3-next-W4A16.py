@@ -1,7 +1,5 @@
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
-import torch.nn as nn
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier
@@ -54,7 +52,7 @@ n = min(NUM_CALIBRATION_SAMPLES, len(ds))
 ds = ds.shuffle(seed=42).select(range(n))
 
 # Render to chat-style text (batch)
-def preprocess(batch):
+def preprocess_chat(batch):
     rendered = [
         tokenizer.apply_chat_template(
             [{"role": "user", "content": t}],
@@ -64,81 +62,31 @@ def preprocess(batch):
     ]
     return {"text": rendered}
 
-ds = ds.map(preprocess, batched=True, num_proc=4)
-
-# Tokenize in batches
-ds = ds.map(
-    lambda batch: tokenizer(
-        batch["text"],
-        padding=False,
-        max_length=MAX_SEQUENCE_LENGTH,
-        truncation=True,
-        add_special_tokens=False,
-    ),
-    batched=True,
-    remove_columns=ds.column_names,
-    num_proc=4,
-)
+ds = ds.map(preprocess_chat, batched=True, num_proc=4)
 
 # =========================
 # AWQ recipe with config_groups
 #  - Weight-only INT4 (W4A16 **symmetric**)
-#  - group_size: 128
-#  - IMPORTANT: do NOT ignore FFN gate/up/down proj (quantize them)
+#  - group_size: 32 (manual setting)
+#  - IMPORTANT: skip MoE routers (mlp.gate, mlp.shared_expert_gate), keep quantizing FFN projections
 #  - Keep MoE router-related linears and output head unquantized
 # =========================
-router_keywords = (
-    "router",
-    "expert_choice",
-    "dispatch",
-    "scores",
-    "route",
-    "topk",
-    "switch",
-)
-
-def _should_ignore_module(module_name: str) -> bool:
-    name = module_name.lower()
-    # Keep FFN projections quantized
-    if any(x in name for x in ("gate_proj", "up_proj", "down_proj")):
-        return False
-    # Ignore routing-related linears
-    if any(k in name for k in router_keywords):
-        return True
-    # Ignore Gate head
-    if name.endswith("mlp.gate") or "mlp.shared_expert_gate" in name or name.endswith("shared_expert_gate"):
-        return True
-    # Do not quantize final output head
-    if name.endswith("lm_head") or name == "lm_head":
-        return True
-    return False
-
-# Build ignore list dynamically based on module names in the loaded model
-moe_ignores = []
-for mod_name, mod in model.named_modules():
-    if isinstance(mod, nn.Linear) and _should_ignore_module(mod_name):
-        moe_ignores.append(mod_name)
-moe_ignores = sorted(set(moe_ignores + ["lm_head"]))
-
 recipe = [
     AWQModifier(
-        targets=["Linear"],        # quantize all Linear layers uniformly
-        ignore=moe_ignores,
+        ignore=["lm_head", "re:.*mlp.gate$", "re:.*mlp.shared_expert_gate$"],
         config_groups={
             "group_0": {
-                # Uniformly quantize Linear layers; ignore list handles routers/lm_head
                 "targets": ["Linear"],
                 "weights": {
                     "num_bits": 4,
                     "type": "int",
-                    "symmetric": True,   # W4A16 (symmetric)
+                    "symmetric": True,
                     "strategy": "group",
-                    "group_size": 32,    # robust to non power-of-two channel dims
+                    "group_size": 32,
                     "dynamic": False,
                 },
             },
         },
-        # Optional mappings can be added, but not required
     ),
 ]
 
