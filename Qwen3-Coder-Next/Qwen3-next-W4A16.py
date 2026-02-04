@@ -392,6 +392,7 @@ recipe = [
     AWQModifier(
         ignore=["lm_head", "re:.*mlp.gate$", "re:.*mlp.shared_expert_gate$"],
         config_groups={"group_0": quant_scheme},
+        offload_device="cuda",
     ),
 ]
 
