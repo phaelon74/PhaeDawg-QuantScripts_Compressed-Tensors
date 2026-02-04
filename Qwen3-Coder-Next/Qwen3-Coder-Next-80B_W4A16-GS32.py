@@ -631,6 +631,7 @@ oneshot_kwargs = {
     "tokenizer": tokenizer,
     "pipeline": "sequential",  # Use sequential pipeline for memory efficiency
     "moe_calibrate_all_experts": True,  # Ensure all 512 experts receive calibration samples
+    "batch_size": 2,
 }
 
 # Add sequential_targets if detected
