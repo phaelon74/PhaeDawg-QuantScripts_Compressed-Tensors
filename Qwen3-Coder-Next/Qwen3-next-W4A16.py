@@ -400,13 +400,13 @@ recipe = [
 # =========================
 print(f"\n=== Running one-shot compression with {NUM_CALIBRATION_SAMPLES} calibration samples ===")
 oneshot(
-    model=model,
-    dataset=ds,
-    recipe=recipe,
-    max_seq_length=MAX_SEQUENCE_LENGTH,
-    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
-    calibrate_moe_context=True,
-)
+        model=model,
+        dataset=ds,
+        recipe=recipe,
+        max_seq_length=MAX_SEQUENCE_LENGTH,
+        num_calibration_samples=NUM_CALIBRATION_SAMPLES,
+        tokenizer=tokenizer,
+    )
 
 # =========================
 # Save compressed model
