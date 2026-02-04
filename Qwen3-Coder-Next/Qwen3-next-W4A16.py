@@ -217,7 +217,14 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 print(f"\nModel loaded to CPU from: {MODEL_ID}")
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
-print(f"Model device: CPU (will use sequential GPU processing during quantization)")
+
+# Verify model is on CPU (critical for sequential processing)
+model_device = next(model.parameters()).device
+if model_device.type == 'cpu':
+    print(f"✓ Model device: CPU (will use sequential GPU processing during quantization)")
+else:
+    print(f"⚠ WARNING: Model is on {model_device} - sequential processing may not work correctly!")
+    print(f"  Expected: CPU, Got: {model_device}")
 
 
 # =========================
@@ -539,7 +546,8 @@ recipe = [
     AWQModifier(
         ignore=["lm_head", "re:.*mlp.gate$", "re:.*mlp.shared_expert_gate$"],
         config_groups={"group_0": quant_scheme},
-        offload_device="cuda",   # avoid slow CPU offload
+        # NOTE: Do NOT set offload_device - sequential pipeline handles device management
+        # Setting offload_device causes AttributeError with Qwen3-Coder-Next's functools.partial forwards
     ),
 ]
 
@@ -560,19 +568,30 @@ if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated(i) / 1e9
         reserved = torch.cuda.memory_reserved(i) / 1e9
         total = torch.cuda.get_device_properties(i).total_memory / 1e9
-        print(f"  GPU {i}: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved, {total:.1f}GB total")
+        free = total - reserved
+        print(f"  GPU {i}: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved, {free:.1f}GB free, {total:.1f}GB total")
+    
+    # Verify model is still on CPU
+    model_device = next(model.parameters()).device
+    if model_device.type != 'cpu':
+        raise RuntimeError(f"Model moved to {model_device} before quantization! Expected CPU.")
+    print(f"\n✓ Verified: Model still on CPU (device={model_device})")
 
 # Run AWQ quantization with sequential layer processing
 # Model is on CPU (device_map=None), oneshot() will:
-#   1. Load layer N to GPU
+#   1. Load Linear layer N to GPU
 #   2. Run calibration forward passes through layer N
 #   3. Collect activation statistics for AWQ scaling
 #   4. Compute optimal per-channel scales for layer N
 #   5. Quantize layer N weights to INT4
 #   6. Move quantized layer back to CPU
-#   7. Repeat for layer N+1
+#   7. Repeat for Linear layer N+1
 #
-# This keeps peak VRAM usage to ~40-60GB instead of 200GB+
+# sequential_targets=["Linear"] ensures only one Linear layer at a time on GPU
+# This keeps peak VRAM usage to ~20-40GB instead of 200GB+
+#
+# IMPORTANT: With 512 diverse calibration samples, all 512 experts should be
+# activated multiple times during calibration, ensuring proper quantization.
 oneshot(
     model=model,
     dataset=ds,
@@ -580,6 +599,7 @@ oneshot(
     max_seq_length=MAX_SEQUENCE_LENGTH,
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
     tokenizer=tokenizer,
+    sequential_targets=["Linear"],  # Process Linear layers one at a time to avoid OOM
 )
 
 # =========================
