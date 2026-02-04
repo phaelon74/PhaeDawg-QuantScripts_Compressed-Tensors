@@ -1,0 +1,14 @@
+calibration_set:
+  max_seq_length: 2048
+  shuffle: true
+  seed: 42
+  num_samples: 512
+  datasets:
+    - dataset: wikitext
+      name: wikitext-2-raw-v1
+      split: validation
+      formatter: raw_text
+      columns:
+        - text
+      num_samples: 512
+      streaming: false

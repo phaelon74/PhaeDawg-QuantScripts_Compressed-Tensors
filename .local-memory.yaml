@@ -1,0 +1,6 @@
+storage:
+  type: sqlite
+  path: "H:/Github Repositories/PhaeDawg-QuantScripts_Compressed-Tensors/.opencode-memory.db"
+
+logging:
+  level: info
