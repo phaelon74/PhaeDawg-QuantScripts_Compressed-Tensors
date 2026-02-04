@@ -590,7 +590,7 @@ print(f"\n=== Running one-shot compression with {NUM_CALIBRATION_SAMPLES} calibr
 print(f"  - Sequence length: {MAX_SEQUENCE_LENGTH}")
 print(f"  - Calibration samples: {NUM_CALIBRATION_SAMPLES}")
 print(f"  - Pipeline: basic (skips FX tracing)")
-print(f"  - MoE calibration: enabled (all 512 experts)")
+print(f"  - MoE calibration: default (moe_calibrate_all_experts=True)")
 
 # Clear memory before quantization
 clear_memory()
@@ -609,15 +609,15 @@ if torch.cuda.is_available():
 # Using device_map="auto" + pipeline="basic" approach:
 #   1. Model is distributed across GPUs via device_map="auto"
 #   2. pipeline="basic" skips FX tracing (avoids @torch.fx.wrap issues)
-#   3. calibrate_moe_context=True ensures all 512 experts receive calibration
+#   3. moe_calibrate_all_experts defaults to True (ensures all 512 experts are calibrated)
 #   4. Ignoring linear_attn/self_attn layers avoids any remaining tracing issues
 #
 # This approach follows successful quantizations:
-#   - dazipe/Qwen3-Next-80B-A3B-Instruct-GPTQ-Int4A16 (used calibrate_moe_context=True)
+#   - dazipe/Qwen3-Next-80B-A3B-Instruct-GPTQ-Int4A16
 #   - nm-testing/Qwen3-Coder-30B-A3B-Instruct-W4A16-awq
 #
-# IMPORTANT: calibrate_moe_context=True ensures proper MoE expert calibration
-# by forcing all experts to receive samples, not just frequently-activated ones.
+# NOTE: moe_calibrate_all_experts defaults to True in newer llmcompressor versions,
+# ensuring all MoE experts receive calibration samples for proper quantization.
 oneshot(
     model=model,
     dataset=ds,
@@ -625,8 +625,7 @@ oneshot(
     max_seq_length=MAX_SEQUENCE_LENGTH,
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
     tokenizer=tokenizer,
-    pipeline="basic",              # Skip FX tracing to avoid @torch.fx.wrap issues
-    calibrate_moe_context=True,    # Ensure all 512 MoE experts are calibrated
+    pipeline="basic",  # Skip FX tracing to avoid @torch.fx.wrap issues
 )
 
 # =========================
