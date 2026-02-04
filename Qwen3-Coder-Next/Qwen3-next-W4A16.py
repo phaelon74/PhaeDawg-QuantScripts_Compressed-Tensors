@@ -12,40 +12,111 @@ from llmcompressor.modifiers.awq import AWQModifier
 from llmcompressor.utils import dispatch_for_generation
 
 # =========================
-# Workaround for FX tracing issue with Qwen3-Coder-Next
+# Comprehensive Fix for FX Tracing Issue with Qwen3-Coder-Next
 # =========================
 # Qwen3-Coder-Next uses @torch.fx.wrap decorators which create functools.partial
 # objects for forward methods. The sequential pipeline's offload code tries to
 # access module.forward.__func__ which doesn't exist for functools.partial.
-# This patch handles functools.partial objects correctly.
+# 
+# This comprehensive patch handles functools.partial objects in ALL offload code paths:
+# 1. offload_module() - handles individual module offloading
+# 2. offload_model() - handles model-level offloading (which calls offload_module)
+# 3. Any other offload functions that might access forward methods
+#
+# CRITICAL: This fix preserves accuracy by:
+# - NOT disabling FX wrappers (they're essential for quantization accuracy)
+# - NOT modifying model forward methods
+# - Only fixing the offload code to handle functools.partial correctly
+# =========================
 try:
     import compressed_tensors.offload.module as offload_module_mod
+    import compressed_tensors.offload.dispatch as offload_dispatch_mod
     
-    # Store original function if it exists
+    # Helper function to check if a module has functools.partial forward
+    def _has_partial_forward(module):
+        """Check if module has a functools.partial forward method."""
+        return (hasattr(module, 'forward') and 
+                isinstance(module.forward, functools.partial))
+    
+    # Helper function to safely offload modules with functools.partial forward
+    def _safe_offload_module(module, offload_device):
+        """Safely offload a module without trying to wrap functools.partial forward."""
+        if hasattr(module, 'to'):
+            module.to(offload_device)
+        # Recursively handle submodules
+        for name, child in module.named_children():
+            _safe_offload_module(child, offload_device)
+    
+    # Patch 1: offload_module() - handles individual module offloading
     if hasattr(offload_module_mod, 'offload_module'):
         _original_offload_module = offload_module_mod.offload_module
         
         def patched_offload_module(module, onload_device, offload_device):
             """Patched version that handles functools.partial forward methods."""
             # Check if forward is a functools.partial
-            if hasattr(module, 'forward') and isinstance(module.forward, functools.partial):
+            if _has_partial_forward(module):
                 # For functools.partial, we can't access __func__ directly
                 # Instead, skip the forward function wrapping and just move the module
                 # The sequential pipeline will handle forward passes correctly
-                if hasattr(module, 'to'):
-                    module.to(offload_device)
+                _safe_offload_module(module, offload_device)
                 return
             
             # For normal forward methods, use original implementation
-            return _original_offload_module(module, onload_device, offload_device)
+            try:
+                return _original_offload_module(module, onload_device, offload_device)
+            except AttributeError as e:
+                # If original fails with AttributeError about __func__, fall back to safe offload
+                if '__func__' in str(e) or 'functools.partial' in str(e):
+                    print(f"⚠ Fallback: Using safe offload for module due to: {e}")
+                    _safe_offload_module(module, offload_device)
+                else:
+                    raise
         
-        # Monkey-patch the offload module
         offload_module_mod.offload_module = patched_offload_module
-        print("✓ Applied workaround for functools.partial forward methods")
+        print("✓ Patched offload_module() to handle functools.partial forward methods")
     else:
-        print("⚠ offload_module not found - workaround skipped")
+        print("⚠ offload_module not found - skipping patch")
+    
+    # Patch 2: offload_model() - handles model-level offloading
+    if hasattr(offload_dispatch_mod, 'offload_model'):
+        _original_offload_model = offload_dispatch_mod.offload_model
+        
+        def patched_offload_model(model, onload_device, offload_device):
+            """Patched version that handles functools.partial forward methods in model."""
+            # Check if model or any submodule has functools.partial forward
+            has_partial = False
+            for name, module in model.named_modules():
+                if _has_partial_forward(module):
+                    has_partial = True
+                    break
+            
+            if has_partial:
+                # Use safe offload for entire model
+                _safe_offload_module(model, offload_device)
+                return
+            
+            # For normal models, use original implementation
+            try:
+                return _original_offload_model(model, onload_device, offload_device)
+            except AttributeError as e:
+                # If original fails with AttributeError about __func__, fall back to safe offload
+                if '__func__' in str(e) or 'functools.partial' in str(e):
+                    print(f"⚠ Fallback: Using safe offload for model due to: {e}")
+                    _safe_offload_module(model, offload_device)
+                else:
+                    raise
+        
+        offload_dispatch_mod.offload_model = patched_offload_model
+        print("✓ Patched offload_model() to handle functools.partial forward methods")
+    else:
+        print("⚠ offload_model not found - skipping patch")
+    
+    print("✓ Comprehensive offload fix applied - preserves FX wrappers for accuracy")
+    
 except Exception as e:
-    print(f"⚠ Could not apply FX tracing workaround: {e}")
+    print(f"⚠ Could not apply comprehensive offload fix: {e}")
+    import traceback
+    traceback.print_exc()
     print("  Sequential processing may still work, but if you see AttributeError,")
     print("  you may need to update compressed_tensors library.")
 
