@@ -72,7 +72,7 @@ MODEL_ID = source_model_path
 # Load model
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
-    torch_dtype=torch.bfloat16,
+    dtype=torch.bfloat16,
     trust_remote_code=True,
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
@@ -392,7 +392,7 @@ recipe = [
     AWQModifier(
         ignore=["lm_head", "re:.*mlp.gate$", "re:.*mlp.shared_expert_gate$"],
         config_groups={"group_0": quant_scheme},
-        offload_device="cuda",
+        offload_device="auto",
     ),
 ]
 
