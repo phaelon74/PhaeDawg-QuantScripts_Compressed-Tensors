@@ -2,7 +2,6 @@ import argparse
 import yaml
 import torch
 import gc
-import functools
 
 from datasets import load_dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -12,113 +11,20 @@ from llmcompressor.modifiers.awq import AWQModifier
 from llmcompressor.utils import dispatch_for_generation
 
 # =========================
-# Comprehensive Fix for FX Tracing Issue with Qwen3-Coder-Next
+# Qwen3-Coder-Next Quantization Strategy
 # =========================
-# Qwen3-Coder-Next uses @torch.fx.wrap decorators which create functools.partial
-# objects for forward methods. The sequential pipeline's offload code tries to
-# access module.forward.__func__ which doesn't exist for functools.partial.
-# 
-# This comprehensive patch handles functools.partial objects in ALL offload code paths:
-# 1. offload_module() - handles individual module offloading
-# 2. offload_model() - handles model-level offloading (which calls offload_module)
-# 3. Any other offload functions that might access forward methods
+# Qwen3-Coder-Next uses @torch.fx.wrap decorators in its DeltaNet (linear attention)
+# layers which cause FX tracing failures with llmcompressor's sequential pipeline.
 #
-# CRITICAL: This fix preserves accuracy by:
-# - NOT disabling FX wrappers (they're essential for quantization accuracy)
-# - NOT modifying model forward methods
-# - Only fixing the offload code to handle functools.partial correctly
+# Solution (based on successful quantizations like dazipe's Qwen3-Next-80B-GPTQ):
+# 1. Use device_map="auto" to distribute the model across both GPUs (192GB total)
+# 2. Use pipeline="basic" to skip FX tracing entirely
+# 3. Use calibrate_moe_context=True to ensure all 512 experts are calibrated
+# 4. Ignore linear_attn and self_attn layers that contain @torch.fx.wrap decorators
+#
+# This approach avoids the "symbolically traced variables cannot be used as inputs
+# to control flow" error while maintaining quantization accuracy.
 # =========================
-try:
-    import compressed_tensors.offload.module as offload_module_mod
-    import compressed_tensors.offload.dispatch as offload_dispatch_mod
-    
-    # Helper function to check if a module has functools.partial forward
-    def _has_partial_forward(module):
-        """Check if module has a functools.partial forward method."""
-        return (hasattr(module, 'forward') and 
-                isinstance(module.forward, functools.partial))
-    
-    # Helper function to safely offload modules with functools.partial forward
-    def _safe_offload_module(module, offload_device):
-        """Safely offload a module without trying to wrap functools.partial forward."""
-        if hasattr(module, 'to'):
-            module.to(offload_device)
-        # Recursively handle submodules
-        for name, child in module.named_children():
-            _safe_offload_module(child, offload_device)
-    
-    # Patch 1: offload_module() - handles individual module offloading
-    if hasattr(offload_module_mod, 'offload_module'):
-        _original_offload_module = offload_module_mod.offload_module
-        
-        def patched_offload_module(module, onload_device, offload_device):
-            """Patched version that handles functools.partial forward methods."""
-            # Check if forward is a functools.partial
-            if _has_partial_forward(module):
-                # For functools.partial, we can't access __func__ directly
-                # Instead, skip the forward function wrapping and just move the module
-                # The sequential pipeline will handle forward passes correctly
-                _safe_offload_module(module, offload_device)
-                return
-            
-            # For normal forward methods, use original implementation
-            try:
-                return _original_offload_module(module, onload_device, offload_device)
-            except AttributeError as e:
-                # If original fails with AttributeError about __func__, fall back to safe offload
-                if '__func__' in str(e) or 'functools.partial' in str(e):
-                    print(f"⚠ Fallback: Using safe offload for module due to: {e}")
-                    _safe_offload_module(module, offload_device)
-                else:
-                    raise
-        
-        offload_module_mod.offload_module = patched_offload_module
-        print("✓ Patched offload_module() to handle functools.partial forward methods")
-    else:
-        print("⚠ offload_module not found - skipping patch")
-    
-    # Patch 2: offload_model() - handles model-level offloading
-    if hasattr(offload_dispatch_mod, 'offload_model'):
-        _original_offload_model = offload_dispatch_mod.offload_model
-        
-        def patched_offload_model(model, onload_device, offload_device):
-            """Patched version that handles functools.partial forward methods in model."""
-            # Check if model or any submodule has functools.partial forward
-            has_partial = False
-            for name, module in model.named_modules():
-                if _has_partial_forward(module):
-                    has_partial = True
-                    break
-            
-            if has_partial:
-                # Use safe offload for entire model
-                _safe_offload_module(model, offload_device)
-                return
-            
-            # For normal models, use original implementation
-            try:
-                return _original_offload_model(model, onload_device, offload_device)
-            except AttributeError as e:
-                # If original fails with AttributeError about __func__, fall back to safe offload
-                if '__func__' in str(e) or 'functools.partial' in str(e):
-                    print(f"⚠ Fallback: Using safe offload for model due to: {e}")
-                    _safe_offload_module(model, offload_device)
-                else:
-                    raise
-        
-        offload_dispatch_mod.offload_model = patched_offload_model
-        print("✓ Patched offload_model() to handle functools.partial forward methods")
-    else:
-        print("⚠ offload_model not found - skipping patch")
-    
-    print("✓ Comprehensive offload fix applied - preserves FX wrappers for accuracy")
-    
-except Exception as e:
-    print(f"⚠ Could not apply comprehensive offload fix: {e}")
-    import traceback
-    traceback.print_exc()
-    print("  Sequential processing may still work, but if you see AttributeError,")
-    print("  you may need to update compressed_tensors library.")
 
 
 # =========================
@@ -284,26 +190,25 @@ MODEL_ID = source_model_path
 # - Uses @torch.fx.wrap decorators which break FX tracing in sequential pipeline
 #
 # Memory calculation for 2x RTX PRO 6000 Blackwell (192GB total):
-#   - Model weights (BF16):     ~160GB (on CPU during sequential processing)
-#   - Per-layer on GPU:        ~3-5GB per Linear layer
-#   - Calibration samples:     512 samples × 2048 tokens = processed in batches
-#   - Activations per layer:   ~2-5GB per layer during calibration
-#   - Peak VRAM per GPU:        ~10-15GB (one layer + activations)
+#   - Model weights (BF16):     ~160GB
+#   - Calibration overhead:     ~20-30GB
+#   - Total required:           ~180-190GB
+#   - Available VRAM:           192GB (2x 96GB)
 #
-# Solution: Sequential processing with model on CPU
-#   - Model stays on CPU (device_map=None)
-#   - Sequential pipeline loads one Linear layer at a time to GPU
-#   - Processes 512 calibration samples through that layer
-#   - Quantizes and offloads before next layer
-#   - Avoids FX tracing by not tracing the full model forward
+# Solution: Use device_map="auto" with pipeline="basic"
+#   - Model distributed across both GPUs via device_map="auto"
+#   - pipeline="basic" skips FX tracing entirely (avoids @torch.fx.wrap issues)
+#   - calibrate_moe_context=True ensures all 512 experts receive calibration
+#   - Ignore linear_attn layers that contain problematic @torch.fx.wrap code
 #
-# NOTE: Sequential processing handles FX-wrapped modules correctly by processing
-#       individual Linear layers without tracing the full model graph
+# This approach follows successful quantizations like:
+#   - dazipe/Qwen3-Next-80B-A3B-Instruct-GPTQ-Int4A16
+#   - nm-testing/Qwen3-Coder-30B-A3B-Instruct-W4A16-awq
 # =========================
 
 print("\n" + "="*70)
-print("Loading Qwen3-Coder-Next to CPU (device_map=None)")
-print("Sequential layer processing will handle one Linear layer at a time")
+print("Loading Qwen3-Coder-Next with device_map='auto'")
+print("Model will be distributed across available GPUs")
 print("="*70 + "\n")
 
 # Show available GPU memory
@@ -314,30 +219,27 @@ if torch.cuda.is_available():
         print(f"  GPU {i}: {props.name} - {props.total_memory / 1e9:.1f}GB total, {free_mem / 1e9:.1f}GB free")
     total_vram = sum(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count()))
     print(f"  Total VRAM: {total_vram / 1e9:.1f}GB")
-    print(f"\n  NOTE: Model (~160GB) stays on CPU")
-    print(f"        Sequential processing loads one Linear layer (~3-5GB) at a time to GPU")
-    print(f"        Peak VRAM: ~10-15GB per GPU (layer + calibration activations)")
+    print(f"\n  NOTE: Model (~160GB BF16) will be distributed across GPUs")
+    print(f"        Using pipeline='basic' to skip FX tracing")
+    print(f"        Using calibrate_moe_context=True for all 512 experts")
 
-# Load model to CPU - sequential processing will handle GPU loading layer by layer
-# This avoids FX tracing issues by not loading the full model graph
+# Load model with device_map="auto" to distribute across GPUs
+# This avoids the sequential pipeline's FX tracing which fails on @torch.fx.wrap
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     torch_dtype=torch.bfloat16,
-    device_map=None,  # Load to CPU - sequential processing handles GPU layer by layer
+    device_map="auto",  # Distribute across 2x 96GB GPUs (192GB total)
     trust_remote_code=True,
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
-print(f"\nModel loaded to CPU from: {MODEL_ID}")
+print(f"\nModel loaded from: {MODEL_ID}")
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
 
-# Verify model is on CPU (critical for sequential processing)
-model_device = next(model.parameters()).device
-if model_device.type == 'cpu':
-    print(f"✓ Model device: CPU (sequential processing will load layers to GPU one at a time)")
-else:
-    print(f"⚠ WARNING: Model is on {model_device} - sequential processing may not work correctly!")
-    print(f"  Expected: CPU, Got: {model_device}")
+# Show model device distribution
+if hasattr(model, 'hf_device_map'):
+    devices_used = set(model.hf_device_map.values())
+    print(f"Model distributed across devices: {devices_used}")
 
 
 # =========================
@@ -627,7 +529,8 @@ print(f"Tokenized {NUM_CALIBRATION_SAMPLES} samples (max_seq_length={MAX_SEQUENC
 # MoE Expert Coverage Analysis
 # =========================
 # Qwen3-Coder-Next has 512 experts with 10 activated per token.
-# We need sufficient diverse samples to activate all experts during calibration.
+# Using calibrate_moe_context=True in oneshot() ensures all experts receive
+# calibration samples, not just frequently-activated ones.
 print_moe_calibration_guidance(model, NUM_CALIBRATION_SAMPLES, MAX_SEQUENCE_LENGTH)
 
 
@@ -635,8 +538,14 @@ print_moe_calibration_guidance(model, NUM_CALIBRATION_SAMPLES, MAX_SEQUENCE_LENG
 # AWQ recipe with config_groups
 #  - Weight-only INT4 (W4A16 **symmetric**)
 #  - Dynamic group_size from argument
-#  - IMPORTANT: skip MoE routers (mlp.gate, mlp.shared_expert_gate), keep quantizing FFN projections
-#  - Keep MoE router-related linears and output head unquantized
+#  - Ignore layers to avoid FX tracing issues and preserve accuracy:
+#    * linear_attn: DeltaNet layers with @torch.fx.wrap decorators
+#    * self_attn: Standard attention layers
+#    * norm layers: All normalization layers
+#    * MoE routers: mlp.gate, mlp.shared_expert_gate, router
+#    * lm_head: Output head
+#
+# This ignore list follows dazipe's successful Qwen3-Next-80B quantization
 # =========================
 from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
 
@@ -657,10 +566,20 @@ quant_scheme = QuantizationScheme(
 
 recipe = [
     AWQModifier(
-        ignore=["lm_head", "re:.*mlp.gate$", "re:.*mlp.shared_expert_gate$"],
+        ignore=[
+            "lm_head",                          # Output head
+            "re:.*mlp.gate$",                   # MoE router gates
+            "re:.*mlp.shared_expert_gate$",     # Shared expert gates
+            "re:.*linear_attn.*",               # DeltaNet layers (has @torch.fx.wrap - causes tracing issues)
+            "re:.*self_attn.*",                 # Standard attention layers
+            "re:.*input_layernorm$",            # Input layer norms
+            "re:.*post_attention_layernorm$",   # Post-attention layer norms
+            "re:.*norm.*",                      # All normalization layers
+            "re:.*router.*",                    # Expert routing layers
+        ],
         config_groups={"group_0": quant_scheme},
-        # NOTE: Do NOT set offload_device - sequential pipeline handles device management
-        # Setting offload_device causes AttributeError with Qwen3-Coder-Next's functools.partial forwards
+        # NOTE: Using pipeline="basic" and ignoring linear_attn/self_attn layers
+        # to avoid FX tracing issues with @torch.fx.wrap decorators in Qwen3-Coder-Next
     ),
 ]
 
@@ -670,47 +589,35 @@ recipe = [
 print(f"\n=== Running one-shot compression with {NUM_CALIBRATION_SAMPLES} calibration samples ===")
 print(f"  - Sequence length: {MAX_SEQUENCE_LENGTH}")
 print(f"  - Calibration samples: {NUM_CALIBRATION_SAMPLES}")
-print("Note: Using SEQUENTIAL layer processing (model on CPU)")
-print("      Each Linear layer loaded to GPU one at a time - avoids OOM")
+print(f"  - Pipeline: basic (skips FX tracing)")
+print(f"  - MoE calibration: enabled (all 512 experts)")
 
 # Clear memory before quantization
 clear_memory()
 
 # Show memory status before quantization
 if torch.cuda.is_available():
-    print("\nGPU memory before quantization (should be near-empty):")
+    print("\nGPU memory before quantization:")
     for i in range(torch.cuda.device_count()):
         allocated = torch.cuda.memory_allocated(i) / 1e9
         reserved = torch.cuda.memory_reserved(i) / 1e9
         total = torch.cuda.get_device_properties(i).total_memory / 1e9
         free = total - reserved
         print(f"  GPU {i}: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved, {free:.1f}GB free, {total:.1f}GB total")
-    
-    # Verify model is still on CPU
-    model_device = next(model.parameters()).device
-    if model_device.type != 'cpu':
-        raise RuntimeError(f"Model moved to {model_device} before quantization! Expected CPU.")
-    print(f"\n✓ Verified: Model still on CPU (device={model_device})")
 
-# Run AWQ quantization with sequential layer processing
-# Model is on CPU (device_map=None), oneshot() will:
-#   1. Load Linear layer N to GPU
-#   2. Run 512 calibration samples (2048 tokens each) through layer N
-#   3. Collect activation statistics for AWQ scaling
-#   4. Compute optimal per-channel scales for layer N
-#   5. Quantize layer N weights to INT4
-#   6. Move quantized layer back to CPU
-#   7. Repeat for Linear layer N+1
+# Run AWQ quantization with basic pipeline
+# Using device_map="auto" + pipeline="basic" approach:
+#   1. Model is distributed across GPUs via device_map="auto"
+#   2. pipeline="basic" skips FX tracing (avoids @torch.fx.wrap issues)
+#   3. calibrate_moe_context=True ensures all 512 experts receive calibration
+#   4. Ignoring linear_attn/self_attn layers avoids any remaining tracing issues
 #
-# sequential_targets=["Linear"] ensures only one Linear layer at a time on GPU
-# Peak VRAM usage: ~10-15GB per GPU (one layer + calibration activations)
-# This fits comfortably in 96GB RTX PRO 6000 cards
+# This approach follows successful quantizations:
+#   - dazipe/Qwen3-Next-80B-A3B-Instruct-GPTQ-Int4A16 (used calibrate_moe_context=True)
+#   - nm-testing/Qwen3-Coder-30B-A3B-Instruct-W4A16-awq
 #
-# IMPORTANT: With 512 diverse calibration samples, all 512 experts should be
-# activated multiple times during calibration, ensuring proper quantization.
-#
-# NOTE: Sequential processing avoids FX tracing issues by processing individual
-#       Linear layers without tracing the full model graph with @torch.fx.wrap decorators
+# IMPORTANT: calibrate_moe_context=True ensures proper MoE expert calibration
+# by forcing all experts to receive samples, not just frequently-activated ones.
 oneshot(
     model=model,
     dataset=ds,
@@ -718,7 +625,8 @@ oneshot(
     max_seq_length=MAX_SEQUENCE_LENGTH,
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
     tokenizer=tokenizer,
-    sequential_targets=["Linear"],  # Process Linear layers one at a time to avoid OOM
+    pipeline="basic",              # Skip FX tracing to avoid @torch.fx.wrap issues
+    calibrate_moe_context=True,    # Ensure all 512 MoE experts are calibrated
 )
 
 # =========================
