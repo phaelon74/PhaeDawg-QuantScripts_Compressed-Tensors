@@ -1,6 +1,7 @@
 import argparse
 import yaml
 import torch
+import gc
 
 from datasets import load_dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -8,6 +9,99 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier
 from llmcompressor.utils import dispatch_for_generation
+
+
+# =========================
+# MoE Expert Coverage Utilities
+# =========================
+def get_moe_expert_info(model):
+    """
+    Extract MoE configuration from Qwen3-Coder-Next model.
+    
+    Returns dict with expert counts and routing info.
+    """
+    config = model.config
+    info = {
+        "num_experts": getattr(config, "num_experts", 512),
+        "num_experts_per_tok": getattr(config, "num_experts_per_tok", 10),
+        "num_shared_experts": getattr(config, "num_shared_experts", 1),
+        "num_layers": getattr(config, "num_hidden_layers", 48),
+    }
+    
+    # Calculate minimum samples needed for expert coverage
+    # Each token activates num_experts_per_tok experts
+    # We want to activate all experts multiple times for good calibration
+    # Rule of thumb: (num_experts / num_experts_per_tok) * coverage_factor
+    coverage_factor = 3  # Each expert should be activated ~3 times on average
+    min_tokens = (info["num_experts"] / info["num_experts_per_tok"]) * coverage_factor
+    
+    # With typical seq_len of 2048, calculate recommended samples
+    typical_seq_len = 2048
+    info["recommended_min_samples"] = max(256, int(min_tokens / typical_seq_len * 10))
+    info["min_tokens_for_coverage"] = int(min_tokens)
+    
+    return info
+
+
+def print_moe_calibration_guidance(model, num_samples, max_seq_len):
+    """
+    Print guidance for MoE expert coverage during calibration.
+    """
+    try:
+        moe_info = get_moe_expert_info(model)
+        
+        print("\n" + "="*70)
+        print("MoE Expert Coverage Analysis for Qwen3-Coder-Next")
+        print("="*70)
+        print(f"  Total experts:           {moe_info['num_experts']}")
+        print(f"  Experts per token:       {moe_info['num_experts_per_tok']}")
+        print(f"  Shared experts:          {moe_info['num_shared_experts']}")
+        print(f"  Number of layers:        {moe_info['num_layers']}")
+        print("-"*70)
+        print(f"  Your calibration setup:")
+        print(f"    - Samples:             {num_samples}")
+        print(f"    - Max sequence length: {max_seq_len}")
+        print(f"    - Estimated tokens:    ~{num_samples * max_seq_len // 2:,} (assuming 50% fill)")
+        print("-"*70)
+        
+        estimated_tokens = num_samples * max_seq_len // 2  # Conservative estimate
+        expert_activations_per_token = moe_info['num_experts_per_tok']
+        estimated_expert_activations = estimated_tokens * expert_activations_per_token
+        avg_activations_per_expert = estimated_expert_activations / moe_info['num_experts']
+        
+        print(f"  Estimated expert activation coverage:")
+        print(f"    - Total expert activations: ~{estimated_expert_activations:,}")
+        print(f"    - Avg activations/expert:   ~{avg_activations_per_expert:,.0f}")
+        
+        # Coverage assessment
+        if avg_activations_per_expert >= 100:
+            coverage_status = "EXCELLENT - All experts should be well-calibrated"
+        elif avg_activations_per_expert >= 50:
+            coverage_status = "GOOD - Most experts should have adequate coverage"
+        elif avg_activations_per_expert >= 10:
+            coverage_status = "FAIR - Some experts may have limited coverage"
+        else:
+            coverage_status = "WARNING - Increase samples for better expert coverage!"
+            
+        print(f"    - Coverage assessment:      {coverage_status}")
+        
+        if avg_activations_per_expert < 50:
+            recommended = moe_info['recommended_min_samples']
+            print(f"\n  RECOMMENDATION: Consider using {recommended}+ samples")
+            print(f"                  with diverse content (code, text, math, etc.)")
+        
+        print("="*70 + "\n")
+        
+    except Exception as e:
+        print(f"Note: Could not analyze MoE config: {e}")
+
+
+def clear_memory():
+    """Clear GPU and CPU memory."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 # =========================
 # Parse Command-Line Arguments
@@ -42,10 +136,6 @@ output_path = args.output_path
 dataset_config_path = args.dataset_config
 group_size = args.group_size
 
-max_mem = {
-    0: "90GiB",
-    1: "90GiB",
-}
 
 # =========================
 # Load Dataset Config and extract config
@@ -74,17 +164,60 @@ print(f"  - datasets to load: {len(datasets_config)}")
 # =========================
 MODEL_ID = source_model_path
 
-# Load model
+# =========================
+# IMPORTANT: Qwen3-Coder-Next Architecture & Memory
+# =========================
+# - 80B total params, 3B activated (MoE)
+# - 512 experts, 10 activated per token + 1 shared expert
+# - Hybrid layout: DeltaNet (linear attention) + Gated Attention
+# - 48 layers with repeating pattern
+#
+# Memory calculation for 2x RTX PRO 6000 Blackwell (192GB total):
+#   - Model weights (BF16):     ~160GB
+#   - KV cache (2048 seq):      ~8-15GB  
+#   - Activations per forward:  ~10-20GB
+#   - AWQ scaling stats:        ~5-10GB
+#   - Total during calibration: ~185-205GB  <-- EXCEEDS 192GB!
+#
+# Solution: Use device_map=None (load to CPU) + sequential layer processing
+#   - llmcompressor's oneshot() handles layer-by-layer GPU processing
+#   - Only ONE layer at a time on GPU (~3-5GB per layer)
+#   - Peak VRAM usage: ~40-60GB (much safer)
+#   - Slower but avoids OOM
+#
+# NOTE: Do NOT use onload_device/offload_device params - they cause
+#       AttributeError with Qwen3-Coder-Next's functools.partial forwards
+# =========================
+
+print("\n" + "="*70)
+print("Loading Qwen3-Coder-Next to CPU (device_map=None)")
+print("Sequential layer processing will be used during quantization")
+print("="*70 + "\n")
+
+# Show available GPU memory
+if torch.cuda.is_available():
+    for i in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(i)
+        free_mem = props.total_memory - torch.cuda.memory_allocated(i)
+        print(f"  GPU {i}: {props.name} - {props.total_memory / 1e9:.1f}GB total, {free_mem / 1e9:.1f}GB free")
+    total_vram = sum(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count()))
+    print(f"  Total VRAM: {total_vram / 1e9:.1f}GB")
+    print(f"\n  NOTE: Model (160GB) + calibration overhead (~45GB) > 192GB")
+    print(f"        Using sequential processing to avoid OOM")
+
+# Load model to CPU - llmcompressor will handle sequential GPU processing
+# This avoids OOM during calibration by only loading one layer at a time
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
-    dtype=torch.bfloat16,
+    torch_dtype=torch.bfloat16,
+    device_map=None,  # Load to CPU - sequential processing handles GPU
     trust_remote_code=True,
-    device_map="auto",          # <-- shards across GPUs
-    max_memory=max_mem,         # <-- forces a 2-GPU split instead of filling GPU0
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
-print(f"Model loaded from: {MODEL_ID}")
+print(f"\nModel loaded to CPU from: {MODEL_ID}")
+print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
+print(f"Model device: CPU (will use sequential GPU processing during quantization)")
 
 
 # =========================
@@ -370,6 +503,13 @@ ds = ds.map(
 NUM_CALIBRATION_SAMPLES = min(len(ds), num_calibration_samples)
 print(f"Tokenized {NUM_CALIBRATION_SAMPLES} samples (max_seq_length={MAX_SEQUENCE_LENGTH})")
 
+# =========================
+# MoE Expert Coverage Analysis
+# =========================
+# Qwen3-Coder-Next has 512 experts with 10 activated per token.
+# We need sufficient diverse samples to activate all experts during calibration.
+print_moe_calibration_guidance(model, NUM_CALIBRATION_SAMPLES, MAX_SEQUENCE_LENGTH)
+
 
 # =========================
 # AWQ recipe with config_groups
@@ -407,14 +547,40 @@ recipe = [
 # Run one-shot compression
 # =========================
 print(f"\n=== Running one-shot compression with {NUM_CALIBRATION_SAMPLES} calibration samples ===")
+print("Note: Using SEQUENTIAL layer processing (model on CPU)")
+print("      Each layer loaded to GPU one at a time - avoids OOM on 192GB system")
+
+# Clear memory before quantization
+clear_memory()
+
+# Show memory status before quantization
+if torch.cuda.is_available():
+    print("\nGPU memory before quantization (should be near-empty):")
+    for i in range(torch.cuda.device_count()):
+        allocated = torch.cuda.memory_allocated(i) / 1e9
+        reserved = torch.cuda.memory_reserved(i) / 1e9
+        total = torch.cuda.get_device_properties(i).total_memory / 1e9
+        print(f"  GPU {i}: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved, {total:.1f}GB total")
+
+# Run AWQ quantization with sequential layer processing
+# Model is on CPU (device_map=None), oneshot() will:
+#   1. Load layer N to GPU
+#   2. Run calibration forward passes through layer N
+#   3. Collect activation statistics for AWQ scaling
+#   4. Compute optimal per-channel scales for layer N
+#   5. Quantize layer N weights to INT4
+#   6. Move quantized layer back to CPU
+#   7. Repeat for layer N+1
+#
+# This keeps peak VRAM usage to ~40-60GB instead of 200GB+
 oneshot(
-        model=model,
-        dataset=ds,
-        recipe=recipe,
-        max_seq_length=MAX_SEQUENCE_LENGTH,
-        num_calibration_samples=NUM_CALIBRATION_SAMPLES,
-        tokenizer=tokenizer,
-    )
+    model=model,
+    dataset=ds,
+    recipe=recipe,
+    max_seq_length=MAX_SEQUENCE_LENGTH,
+    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
+    tokenizer=tokenizer,
+)
 
 # =========================
 # Save compressed model
