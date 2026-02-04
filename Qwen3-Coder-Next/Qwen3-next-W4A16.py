@@ -108,9 +108,46 @@ def format_sharegpt(example, columns, tokenizer):
             # Not JSON, treat as raw text
             formatted_messages.append({'role': 'user', 'content': messages})
             if formatted_messages:
-                text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
-                return {'text': text}
+                try:
+                    text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
+                    return {'text': text}
+                except Exception as e:
+                    # If chat template fails, return empty
+                    print(f"WARNING: Failed to apply chat template: {e}")
+                    return {'text': ''}
             return {'text': ''}
+    
+    # Convert to standard format if needed
+    if isinstance(messages, list):
+        for msg in messages:
+            if isinstance(msg, dict):
+                role = msg.get('role', msg.get('from', 'user'))
+                content = msg.get('content', msg.get('value', ''))
+                # Normalize role names
+                if role in ['human', 'user']:
+                    role = 'user'
+                elif role in ['gpt', 'assistant', 'bot']:
+                    role = 'assistant'
+                elif role == 'system':
+                    role = 'system'
+                if content:  # Only add if there's content
+                    formatted_messages.append({'role': role, 'content': str(content)})
+            elif isinstance(msg, str):
+                # Alternate user/assistant for string lists
+                idx = len([m for m in formatted_messages if m['role'] != 'system'])
+                role = 'user' if idx % 2 == 0 else 'assistant'
+                formatted_messages.append({'role': role, 'content': str(msg)})
+    
+    if not formatted_messages:
+        return {'text': ''}
+    
+    try:
+        text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
+        return {'text': text}
+    except Exception as e:
+        # If chat template fails, return empty
+        print(f"WARNING: Failed to apply chat template: {e}")
+        return {'text': ''}
     
     # Convert to standard format if needed
     if isinstance(messages, list):
@@ -157,8 +194,13 @@ def format_prompt_answer(example, columns, tokenizer):
         {'role': 'assistant', 'content': str(answer)}
     ]
     
-    text = tokenizer.apply_chat_template(messages, tokenize=False)
-    return {'text': text}
+    try:
+        text = tokenizer.apply_chat_template(messages, tokenize=False)
+        return {'text': text}
+    except Exception as e:
+        # If chat template fails, return empty
+        print(f"WARNING: Failed to apply chat template in prompt_answer format: {e}")
+        return {'text': ''}
 
 
 def format_chat_completion(example, columns, tokenizer):
@@ -170,16 +212,25 @@ def format_chat_completion(example, columns, tokenizer):
             if isinstance(data, list) and len(data) > 0:
                 if isinstance(data[0], dict):
                     # Already in messages format
-                    text = tokenizer.apply_chat_template(data, tokenize=False)
-                    return {'text': text}
+                    try:
+                        text = tokenizer.apply_chat_template(data, tokenize=False)
+                        return {'text': text}
+                    except Exception as e:
+                        # If chat template fails, return empty
+                        print(f"WARNING: Failed to apply chat template: {e}")
+                        return {'text': ''}
                 elif isinstance(data[0], str):
                     # List of strings - alternate user/assistant
                     messages = []
                     for i, item in enumerate(data):
                         role = 'user' if i % 2 == 0 else 'assistant'
                         messages.append({'role': role, 'content': str(item)})
-                    text = tokenizer.apply_chat_template(messages, tokenize=False)
-                    return {'text': text}
+                    try:
+                        text = tokenizer.apply_chat_template(messages, tokenize=False)
+                        return {'text': text}
+                    except Exception as e:
+                        print(f"WARNING: Failed to apply chat template: {e}")
+                        return {'text': ''}
             elif isinstance(data, str):
                 # Single text field
                 return {'text': str(data)}
@@ -192,9 +243,23 @@ def format_chat_completion(example, columns, tokenizer):
 def format_raw_text(example, columns, tokenizer):
     """Format raw text data."""
     texts = []
+    
+    # Handle custom parameters from dataset config
+    prefix = ""
+    if '_formatter_params' in example and isinstance(example['_formatter_params'], dict):
+        params = example['_formatter_params']
+        if 'prefix' in params:
+            prefix = str(params['prefix'])
+    
+    # Also support prefix in columns[0] for raw_text datasets
+    if len(columns) == 1 and columns[0] not in ['text', 'content', 'user', 'prompt', 'problem', 'instruction', 'prompt_input', 'article', 'text_output']:
+        prefix += str(columns[0]) + "\n***\n"
+    
     for col in columns:
         if col in example and example[col]:
-            texts.append(str(example[col]))
+            text_content = str(example[col])
+            texts.append(prefix + text_content)
+    
     return {'text': ' '.join(texts)}
 
 
@@ -203,6 +268,7 @@ FORMATTERS = {
     'prompt_answer': format_prompt_answer,
     'chat_completion': format_chat_completion,
     'raw_text': format_raw_text,
+    'deepmind_code_contests': format_raw_text,
 }
 
 
@@ -275,27 +341,6 @@ print(f"\n=== Total samples loaded: {total_samples} ===")
 # Shuffle combined dataset if requested
 if SHUFFLE:
     ds = ds.shuffle(seed=SEED)
-
-# Add chat-style preprocessing for Qwen if needed
-def preprocess_chat(batch, tokenizer):
-    rendered = [
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": t}],
-            tokenize=False,
-        )
-        for t in batch["text"]
-    ]
-    return {"text": rendered}
-
-# Check if dataset requires chat formatting (Qwen-style)
-# If dataset is raw_text, we might need to apply chat template
-if 'wikitext' in dataset_config_path.lower():
-    ds = ds.map(
-        lambda x: {
-            'text': formatter_fn(x, columns, tokenizer)
-        } if len(x.get('text', '')) > 0 else {'text': ''},
-        num_proc=1
-    )
 
 
 # =========================
