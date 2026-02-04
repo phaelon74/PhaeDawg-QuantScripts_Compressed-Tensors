@@ -42,6 +42,11 @@ output_path = args.output_path
 dataset_config_path = args.dataset_config
 group_size = args.group_size
 
+max_mem = {
+    0: "90GiB",
+    1: "90GiB",
+}
+
 # =========================
 # Load Dataset Config and extract config
 # =========================
@@ -74,6 +79,8 @@ model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     dtype=torch.bfloat16,
     trust_remote_code=True,
+    device_map="auto",          # <-- shards across GPUs
+    max_memory=max_mem,         # <-- forces a 2-GPU split instead of filling GPU0
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
@@ -392,7 +399,7 @@ recipe = [
     AWQModifier(
         ignore=["lm_head", "re:.*mlp.gate$", "re:.*mlp.shared_expert_gate$"],
         config_groups={"group_0": quant_scheme},
-        offload_device="auto",
+        offload_device="cuda",   # avoid slow CPU offload
     ),
 ]
 
