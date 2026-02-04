@@ -13,16 +13,19 @@ from llmcompressor.modifiers.awq import AWQModifier
 # Qwen3-Coder-Next Quantization Strategy
 # =========================
 # Qwen3-Coder-Next uses @torch.fx.wrap decorators in its DeltaNet (linear attention)
-# layers which cause FX tracing failures with llmcompressor's sequential pipeline.
+# layers which require careful handling with llmcompressor's sequential pipeline.
 #
-# Solution (based on successful quantizations like dazipe's Qwen3-Next-80B-GPTQ):
-# 1. Use device_map="auto" to distribute the model across both GPUs (192GB total)
-# 2. Use pipeline="basic" to skip FX tracing entirely
-# 3. Use moe_calibrate_all_experts=True to ensure all 512 experts are calibrated
-# 4. Ignore linear_attn and self_attn layers that contain @torch.fx.wrap decorators
+# Solution for memory-constrained quantization (512 samples × 2048 seq length):
+# 1. Use device_map=None to load model to CPU first (sequential onloading)
+# 2. Use pipeline="sequential" to process layers one at a time (CPU -> GPU -> CPU)
+# 3. Use sequential_targets to specify decoder layers for sequential processing
+# 4. Use tracing_ignore to handle @torch.fx.wrap decorators during FX tracing
+# 5. Use moe_calibrate_all_experts=True to ensure all 512 experts are calibrated
+# 6. Ignore linear_attn and self_attn layers that contain @torch.fx.wrap decorators
 #
-# This approach avoids the "symbolically traced variables cannot be used as inputs
-# to control flow" error while maintaining quantization accuracy.
+# Sequential onloading dramatically reduces peak memory usage by processing
+# one layer at a time instead of loading the entire model + calibration data.
+# This approach maintains quantization accuracy while fitting in available VRAM.
 # =========================
 
 
@@ -118,6 +121,26 @@ def clear_memory():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
+
+def detect_sequential_targets_for_qwen3_next(model):
+    """
+    Detect decoder layer class names for Qwen3 Next architecture.
+    Returns list of layer class names to process sequentially.
+    """
+    candidate_names = set()
+    for module in model.modules():
+        cls_name = module.__class__.__name__
+        # Qwen3 Next uses various decoder layer names
+        if cls_name in {
+            "QwenMoeDecoderLayer",
+            "Qwen3MoeDecoderLayer", 
+            "Qwen3NextDecoderLayer",
+            "Qwen3CoderDecoderLayer",
+        }:
+            candidate_names.add(cls_name)
+    return sorted(candidate_names) if candidate_names else None
+
+
 # =========================
 # Parse Command-Line Arguments
 # =========================
@@ -191,28 +214,38 @@ MODEL_ID = model_path
 # - 512 experts, 10 activated per token + 1 shared expert
 # - Hybrid layout: DeltaNet (linear attention) + Gated Attention
 # - 48 layers with repeating pattern
-# - Uses @torch.fx.wrap decorators which break FX tracing in sequential pipeline
+# - Uses @torch.fx.wrap decorators which require careful handling with sequential pipeline
 #
 # Memory calculation for 2x RTX PRO 6000 Blackwell (192GB total):
 #   - Model weights (BF16):     ~160GB
-#   - Calibration overhead:     ~20-30GB
-#   - Total required:           ~180-190GB
+#   - Calibration overhead:     ~20-30GB per layer (sequential processing)
+#   - Peak memory per layer:   ~2-4GB (much lower with sequential onloading)
 #   - Available VRAM:           192GB (2x 96GB)
 #
-# Solution: Use device_map="auto" with pipeline="basic"
-#   - Model distributed across both GPUs via device_map="auto"
-#   - pipeline="basic" skips FX tracing entirely (avoids @torch.fx.wrap issues)
+# Solution: Use device_map=None with pipeline="sequential"
+#   - Model loaded to CPU first (device_map=None) for sequential onloading
+#   - Sequential pipeline processes one layer at a time: CPU -> GPU -> CPU
+#   - Dramatically reduces peak memory usage (can't fit model + 512 samples × 2048 seq length)
+#   - pipeline="sequential" with tracing_ignore handles @torch.fx.wrap decorators
 #   - moe_calibrate_all_experts=True ensures all 512 experts receive calibration
+#   - sequential_targets specifies which decoder layers to process sequentially
 #   - Ignore linear_attn layers that contain problematic @torch.fx.wrap code
 #
+# Sequential onloading approach:
+#   1. Load entire model to CPU (device_map=None)
+#   2. During oneshot(), pipeline loads each decoder layer to GPU one at a time
+#   3. Applies quantization calibration to that layer
+#   4. Offloads quantized layer back to CPU before processing next layer
+#   5. This allows quantizing models larger than GPU memory
+#
 # This approach follows successful quantizations like:
-#   - dazipe/Qwen3-Next-80B-A3B-Instruct-GPTQ-Int4A16
-#   - nm-testing/Qwen3-Coder-30B-A3B-Instruct-W4A16-awq
+#   - Examples from LLM_Compressor Team/big_models_with_sequential_onloading
+#   - Qwen3-VL-235B-A22B-Instruct quantization with sequential pipeline
 # =========================
 
 print("\n" + "="*70)
-print("Loading Qwen3-Coder-Next with device_map='auto'")
-print("Model will be distributed across available GPUs")
+print("Loading Qwen3-Coder-Next to CPU (device_map=None)")
+print("Sequential onloading will process layers one-by-one during quantization")
 print("="*70 + "\n")
 
 # Show available GPU memory
@@ -223,27 +256,25 @@ if torch.cuda.is_available():
         print(f"  GPU {i}: {props.name} - {props.total_memory / 1e9:.1f}GB total, {free_mem / 1e9:.1f}GB free")
     total_vram = sum(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count()))
     print(f"  Total VRAM: {total_vram / 1e9:.1f}GB")
-    print(f"\n  NOTE: Model (~160GB BF16) will be distributed across GPUs")
-    print(f"        Using pipeline='basic' to skip FX tracing")
+    print(f"\n  NOTE: Model (~160GB BF16) will be loaded to CPU first")
+    print(f"        Sequential pipeline will process layers one at a time")
+    print(f"        Using pipeline='sequential' for memory-efficient quantization")
     print(f"        Using moe_calibrate_all_experts=True for all 512 experts")
 
-# Load model with device_map="auto" to distribute across GPUs
-# This avoids the sequential pipeline's FX tracing which fails on @torch.fx.wrap
+# Load model to CPU for sequential onloading
+# Sequential pipeline requires model on CPU initially, then loads layers one-by-one to GPU
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     torch_dtype=torch.bfloat16,
-    device_map="auto",  # Distribute across available GPUs
+    device_map=None,  # Load to CPU for sequential onloading
     trust_remote_code=True,
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 print(f"\nModel loaded from: {MODEL_ID}")
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
-
-# Show model device distribution
-if hasattr(model, 'hf_device_map'):
-    devices_used = set(model.hf_device_map.values())
-    print(f"Model distributed across devices: {devices_used}")
+print(f"Model loaded to: CPU (device_map=None)")
+print(f"Sequential pipeline will onload layers to GPU during quantization")
 
 
 # =========================
@@ -543,8 +574,8 @@ recipe = [
                 },
             },
         },
-        # NOTE: Using pipeline="basic" and ignoring linear_attn/self_attn layers
-        # to avoid FX tracing issues with @torch.fx.wrap decorators in Qwen3-Coder-Next
+        # NOTE: Using pipeline="sequential" with tracing_ignore and ignoring linear_attn/self_attn layers
+        # to handle FX tracing issues with @torch.fx.wrap decorators in Qwen3-Coder-Next
     ),
 ]
 
@@ -554,7 +585,15 @@ recipe = [
 print(f"\n=== Running one-shot compression with {NUM_CALIBRATION_SAMPLES} calibration samples ===")
 print(f"  - Sequence length: {MAX_SEQUENCE_LENGTH}")
 print(f"  - Calibration samples: {NUM_CALIBRATION_SAMPLES}")
-print(f"  - Pipeline: basic (skips FX tracing)")
+print(f"  - Pipeline: sequential (memory-efficient layer-by-layer processing)")
+
+# Detect sequential targets for Qwen3 Next architecture
+sequential_targets = detect_sequential_targets_for_qwen3_next(model)
+if sequential_targets:
+    print(f"  - Sequential targets detected: {sequential_targets}")
+else:
+    print("  - WARNING: Could not detect sequential targets, using default behavior")
+
 print(f"  - MoE calibration: moe_calibrate_all_experts=True")
 
 # Clear memory before quantization
@@ -570,26 +609,51 @@ if torch.cuda.is_available():
         free = total - reserved
         print(f"  GPU {i}: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved, {free:.1f}GB free, {total:.1f}GB total")
 
-# Run AWQ quantization with basic pipeline
-# Using device_map="auto" + pipeline="basic" approach:
-#   1. Model is distributed across GPUs via device_map="auto"
-#   2. pipeline="basic" skips FX tracing (avoids @torch.fx.wrap issues)
-#   3. moe_calibrate_all_experts=True ensures all 512 experts are calibrated
-#   4. Ignoring linear_attn/self_attn layers avoids any remaining tracing issues
+# Configure oneshot with sequential pipeline
+# Using device_map=None + pipeline="sequential" approach:
+#   1. Model loaded to CPU (device_map=None) for sequential onloading
+#   2. Sequential pipeline processes layers one at a time: CPU -> GPU -> CPU
+#   3. Dramatically reduces peak memory usage (can't fit model + 512 samples × 2048 seq length)
+#   4. tracing_ignore helps handle @torch.fx.wrap decorators during FX tracing
+#   5. sequential_targets specifies which decoder layers to process sequentially
+#   6. moe_calibrate_all_experts=True ensures all 512 experts are calibrated
+#   7. Ignoring linear_attn/self_attn layers avoids any remaining tracing issues
 #
 # This approach follows successful quantizations:
-#   - dazipe/Qwen3-Next-80B-A3B-Instruct-GPTQ-Int4A16
-#   - nm-testing/Qwen3-Coder-30B-A3B-Instruct-W4A16-awq
-oneshot(
-    model=model,
-    dataset=ds,
-    recipe=recipe,
-    max_seq_length=MAX_SEQUENCE_LENGTH,
-    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
-    tokenizer=tokenizer,
-    pipeline="basic",  # Skip FX tracing to avoid @torch.fx.wrap issues
-    moe_calibrate_all_experts=True,  # Ensure all 512 experts receive calibration samples
-)
+#   - Examples from LLM_Compressor Team/big_models_with_sequential_onloading
+#   - Qwen3-VL-235B-A22B-Instruct quantization with sequential pipeline
+oneshot_kwargs = {
+    "model": model,
+    "dataset": ds,
+    "recipe": recipe,
+    "max_seq_length": MAX_SEQUENCE_LENGTH,
+    "num_calibration_samples": NUM_CALIBRATION_SAMPLES,
+    "tokenizer": tokenizer,
+    "pipeline": "sequential",  # Use sequential pipeline for memory efficiency
+    "moe_calibrate_all_experts": True,  # Ensure all 512 experts receive calibration samples
+}
+
+# Add sequential_targets if detected
+if sequential_targets:
+    oneshot_kwargs["sequential_targets"] = sequential_targets
+
+# Add tracing_ignore to handle @torch.fx.wrap decorators
+oneshot_kwargs["tracing_ignore"] = [
+    "_update_causal_mask",
+    "create_causal_mask",
+    "_update_mamba_mask",
+    "make_causal_mask",
+    "get_causal_mask",
+    "mask_interface",
+    "mask_function",
+    "_prepare_4d_causal_attention_mask",
+    "_prepare_fsmt_decoder_inputs",
+    "_prepare_4d_causal_attention_mask_with_cache_position",
+    "_update_linear_attn_mask",
+    "project_per_layer_inputs",
+]
+
+oneshot(**oneshot_kwargs)
 
 # =========================
 # Save compressed model
