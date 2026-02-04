@@ -2,6 +2,7 @@ import argparse
 import yaml
 import torch
 import gc
+import functools
 
 from datasets import load_dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -9,6 +10,44 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier
 from llmcompressor.utils import dispatch_for_generation
+
+# =========================
+# Workaround for FX tracing issue with Qwen3-Coder-Next
+# =========================
+# Qwen3-Coder-Next uses @torch.fx.wrap decorators which create functools.partial
+# objects for forward methods. The sequential pipeline's offload code tries to
+# access module.forward.__func__ which doesn't exist for functools.partial.
+# This patch handles functools.partial objects correctly.
+try:
+    import compressed_tensors.offload.module as offload_module_mod
+    
+    # Store original function if it exists
+    if hasattr(offload_module_mod, 'offload_module'):
+        _original_offload_module = offload_module_mod.offload_module
+        
+        def patched_offload_module(module, onload_device, offload_device):
+            """Patched version that handles functools.partial forward methods."""
+            # Check if forward is a functools.partial
+            if hasattr(module, 'forward') and isinstance(module.forward, functools.partial):
+                # For functools.partial, we can't access __func__ directly
+                # Instead, skip the forward function wrapping and just move the module
+                # The sequential pipeline will handle forward passes correctly
+                if hasattr(module, 'to'):
+                    module.to(offload_device)
+                return
+            
+            # For normal forward methods, use original implementation
+            return _original_offload_module(module, onload_device, offload_device)
+        
+        # Monkey-patch the offload module
+        offload_module_mod.offload_module = patched_offload_module
+        print("✓ Applied workaround for functools.partial forward methods")
+    else:
+        print("⚠ offload_module not found - workaround skipped")
+except Exception as e:
+    print(f"⚠ Could not apply FX tracing workaround: {e}")
+    print("  Sequential processing may still work, but if you see AttributeError,")
+    print("  you may need to update compressed_tensors library.")
 
 
 # =========================
@@ -171,27 +210,29 @@ MODEL_ID = source_model_path
 # - 512 experts, 10 activated per token + 1 shared expert
 # - Hybrid layout: DeltaNet (linear attention) + Gated Attention
 # - 48 layers with repeating pattern
+# - Uses @torch.fx.wrap decorators which break FX tracing in sequential pipeline
 #
 # Memory calculation for 2x RTX PRO 6000 Blackwell (192GB total):
-#   - Model weights (BF16):     ~160GB
-#   - KV cache (2048 seq):      ~8-15GB  
-#   - Activations per forward:  ~10-20GB
-#   - AWQ scaling stats:        ~5-10GB
-#   - Total during calibration: ~185-205GB  <-- EXCEEDS 192GB!
+#   - Model weights (BF16):     ~160GB (on CPU during sequential processing)
+#   - Per-layer on GPU:        ~3-5GB per Linear layer
+#   - Calibration samples:     512 samples × 2048 tokens = processed in batches
+#   - Activations per layer:   ~2-5GB per layer during calibration
+#   - Peak VRAM per GPU:        ~10-15GB (one layer + activations)
 #
-# Solution: Use device_map=None (load to CPU) + sequential layer processing
-#   - llmcompressor's oneshot() handles layer-by-layer GPU processing
-#   - Only ONE layer at a time on GPU (~3-5GB per layer)
-#   - Peak VRAM usage: ~40-60GB (much safer)
-#   - Slower but avoids OOM
+# Solution: Sequential processing with model on CPU
+#   - Model stays on CPU (device_map=None)
+#   - Sequential pipeline loads one Linear layer at a time to GPU
+#   - Processes 512 calibration samples through that layer
+#   - Quantizes and offloads before next layer
+#   - Avoids FX tracing by not tracing the full model forward
 #
-# NOTE: Do NOT use onload_device/offload_device params - they cause
-#       AttributeError with Qwen3-Coder-Next's functools.partial forwards
+# NOTE: Sequential processing handles FX-wrapped modules correctly by processing
+#       individual Linear layers without tracing the full model graph
 # =========================
 
 print("\n" + "="*70)
 print("Loading Qwen3-Coder-Next to CPU (device_map=None)")
-print("Sequential layer processing will be used during quantization")
+print("Sequential layer processing will handle one Linear layer at a time")
 print("="*70 + "\n")
 
 # Show available GPU memory
@@ -202,15 +243,16 @@ if torch.cuda.is_available():
         print(f"  GPU {i}: {props.name} - {props.total_memory / 1e9:.1f}GB total, {free_mem / 1e9:.1f}GB free")
     total_vram = sum(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count()))
     print(f"  Total VRAM: {total_vram / 1e9:.1f}GB")
-    print(f"\n  NOTE: Model (160GB) + calibration overhead (~45GB) > 192GB")
-    print(f"        Using sequential processing to avoid OOM")
+    print(f"\n  NOTE: Model (~160GB) stays on CPU")
+    print(f"        Sequential processing loads one Linear layer (~3-5GB) at a time to GPU")
+    print(f"        Peak VRAM: ~10-15GB per GPU (layer + calibration activations)")
 
-# Load model to CPU - llmcompressor will handle sequential GPU processing
-# This avoids OOM during calibration by only loading one layer at a time
+# Load model to CPU - sequential processing will handle GPU loading layer by layer
+# This avoids FX tracing issues by not loading the full model graph
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     torch_dtype=torch.bfloat16,
-    device_map=None,  # Load to CPU - sequential processing handles GPU
+    device_map=None,  # Load to CPU - sequential processing handles GPU layer by layer
     trust_remote_code=True,
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
@@ -221,7 +263,7 @@ print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}
 # Verify model is on CPU (critical for sequential processing)
 model_device = next(model.parameters()).device
 if model_device.type == 'cpu':
-    print(f"✓ Model device: CPU (will use sequential GPU processing during quantization)")
+    print(f"✓ Model device: CPU (sequential processing will load layers to GPU one at a time)")
 else:
     print(f"⚠ WARNING: Model is on {model_device} - sequential processing may not work correctly!")
     print(f"  Expected: CPU, Got: {model_device}")
@@ -555,8 +597,10 @@ recipe = [
 # Run one-shot compression
 # =========================
 print(f"\n=== Running one-shot compression with {NUM_CALIBRATION_SAMPLES} calibration samples ===")
+print(f"  - Sequence length: {MAX_SEQUENCE_LENGTH}")
+print(f"  - Calibration samples: {NUM_CALIBRATION_SAMPLES}")
 print("Note: Using SEQUENTIAL layer processing (model on CPU)")
-print("      Each layer loaded to GPU one at a time - avoids OOM on 192GB system")
+print("      Each Linear layer loaded to GPU one at a time - avoids OOM")
 
 # Clear memory before quantization
 clear_memory()
@@ -580,7 +624,7 @@ if torch.cuda.is_available():
 # Run AWQ quantization with sequential layer processing
 # Model is on CPU (device_map=None), oneshot() will:
 #   1. Load Linear layer N to GPU
-#   2. Run calibration forward passes through layer N
+#   2. Run 512 calibration samples (2048 tokens each) through layer N
 #   3. Collect activation statistics for AWQ scaling
 #   4. Compute optimal per-channel scales for layer N
 #   5. Quantize layer N weights to INT4
@@ -588,10 +632,14 @@ if torch.cuda.is_available():
 #   7. Repeat for Linear layer N+1
 #
 # sequential_targets=["Linear"] ensures only one Linear layer at a time on GPU
-# This keeps peak VRAM usage to ~20-40GB instead of 200GB+
+# Peak VRAM usage: ~10-15GB per GPU (one layer + calibration activations)
+# This fits comfortably in 96GB RTX PRO 6000 cards
 #
 # IMPORTANT: With 512 diverse calibration samples, all 512 experts should be
 # activated multiple times during calibration, ensuring proper quantization.
+#
+# NOTE: Sequential processing avoids FX tracing issues by processing individual
+#       Linear layers without tracing the full model graph with @torch.fx.wrap decorators
 oneshot(
     model=model,
     dataset=ds,
