@@ -1,4 +1,6 @@
 calibration_set:
+  _templates:
+    programming_languages: &programming_languages "Solve the following problem using {{ ['Zephyr', 'Prolog', 'Cobol', 'Apex', 'Crystal', 'Fortran', 'Nim', 'Delphi', 'Ada', 'Objective-C', 'VBA', 'Perl', 'Groovy', 'MATLAB', 'Solidity', 'Visual Basic', 'OCaml', 'Erlang', 'Julia', 'Lisp', 'F#', 'Clojure', 'GDScript', 'Scala', 'R', 'Haskell', 'Ruby', 'Elixir', 'Lua', 'Zig', 'Dart', 'Swift', 'Metal', 'PowerShell', 'PHP', 'Kotlin', 'C', 'Java', 'C++', 'C#', 'Bash/Shell', 'Go', 'Rust', 'TypeScript', 'HTML/CSS', 'SQL', 'JavaScript', 'Python', 'Lean', 'Coq', 'Pony', 'D', 'Racket', 'Haxe', 'x86-64 ASM', 'ARM-64 ASM', 'LLVM IR', 'GLSL', 'CUDA', 'Vulkan'][hash(row|string) % 60] }}\n***\n"
   max_seq_length: 2048
   shuffle: true
   seed: 42
