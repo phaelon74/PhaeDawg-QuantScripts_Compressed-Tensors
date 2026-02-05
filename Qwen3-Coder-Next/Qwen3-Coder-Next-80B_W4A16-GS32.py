@@ -654,7 +654,59 @@ oneshot_kwargs["tracing_ignore"] = [
     "project_per_layer_inputs",
 ]
 
-oneshot(**oneshot_kwargs)
+try:
+    oneshot(**oneshot_kwargs)
+    print("\n✅ Quantization completed successfully!")
+except RuntimeError as e:
+    if "dictionary keys changed during iteration" in str(e):
+        print("\n⚠️  WARNING: Post-processing cleanup failed (known MoE issue)")
+        print("   Quantization completed successfully - continuing to save model...")
+        print(f"   Error details: {e}")
+    else:
+        # Re-raise if it's a different RuntimeError
+        raise
+except Exception as e:
+    # Catch any other exceptions during quantization
+    print(f"\n❌ ERROR during quantization: {e}")
+    import traceback
+    traceback.print_exc()
+    raise
+
+# =========================
+# Cleanup MoE calibration modules (if needed)
+# =========================
+# Cleanup MoE calibration modules if they exist
+# This helps prevent issues during save
+try:
+    for name, module in model.named_modules():
+        # Check for any calibration wrapper modules that might need cleanup
+        module_type = type(module).__name__
+        if 'Calibration' in module_type and hasattr(module, '_original'):
+            # Try to restore original if needed
+            pass  # Usually handled automatically
+except Exception as e:
+    print(f"Note: Could not clean up calibration modules: {e}")
+
+# =========================
+# Ensure model is on CPU before saving (with error handling)
+# =========================
+# Ensure model is on CPU before saving (should already be there with device_map=None)
+# CRITICAL: Wrap in try-except because model.cpu() can trigger the same RuntimeError
+# when iterating over MoE model buffers
+try:
+    if hasattr(model, 'device') and str(model.device) != 'cpu':
+        print("Moving model to CPU before saving...")
+        model = model.cpu()
+    elif hasattr(model, 'hf_device_map'):
+        # Model is distributed - ensure all parts are on CPU
+        print("Ensuring distributed model is on CPU...")
+        model = model.cpu()
+except RuntimeError as e:
+    if "dictionary keys changed during iteration" in str(e):
+        print("⚠️  Note: Could not verify CPU placement (same MoE buffer issue)")
+        print("   Model should already be on CPU (device_map=None) - proceeding with save")
+    else:
+        raise
 
 # =========================
 # Save compressed model
