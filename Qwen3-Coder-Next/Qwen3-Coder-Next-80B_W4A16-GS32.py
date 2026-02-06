@@ -8,6 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier
+from llmcompressor.modifiers.awq.mappings import AWQMapping
 
 # =========================
 # Qwen3-Coder-Next Quantization Strategy
@@ -538,28 +539,71 @@ print_moe_calibration_guidance(model, NUM_CALIBRATION_SAMPLES, MAX_SEQUENCE_LENG
 # AWQ recipe with dictionary-based config_groups
 #  - Weight-only INT4 (W4A16 **symmetric**)
 #  - Dynamic group_size from argument
-#  - Specified entirely in AWQModifier (not using QuantizationScheme)
-#  - Ignore layers to avoid FX tracing issues and preserve accuracy:
-#    * linear_attn: DeltaNet layers with @torch.fx.wrap decorators
-#    * self_attn: Standard attention layers
-#    * norm layers: All normalization layers
-#    * MoE routers: mlp.gate, mlp.shared_expert_gate, router
-#    * lm_head: Output head
+#  - Custom AWQ mappings for Qwen3-Next DeltaNet (linear_attn) architecture
+#  - Ignore layers to avoid FX tracing issues and preserve accuracy
 #
-# This ignore list follows dazipe's successful Qwen3-Next-80B quantization
+# This recipe follows cyankiwi's successful Qwen3-Next-80B-A3B AWQ quantization:
+# https://huggingface.co/cyankiwi/Qwen3-Next-80B-A3B-Instruct-AWQ-4bit
+#
+# Key differences from standard AWQ:
+#  1. Custom mappings for DeltaNet linear_attn layers (in_proj_qkvz, in_proj_ba, out_proj)
+#  2. Extended ignore list including embed_tokens, rotary, RMSNorm, mtp layers
+#  3. MSE observer for more robust scale calculation
+#  4. duo_scaling=True for better weight/activation balance
+#  5. offload_device="cpu" for memory efficiency with large MoE models
 # =========================
 recipe = [
     AWQModifier(
         ignore=[
+            "model.embed_tokens",               # Embedding layer
             "lm_head",                          # Output head
-            "re:.*mlp.gate$",                   # MoE router gates
-            "re:.*mlp.shared_expert_gate$",     # Shared expert gates
-            "re:.*linear_attn.*",               # DeltaNet layers (has @torch.fx.wrap - causes tracing issues)
+            "re:.*mlp[.]gate$",                 # MoE router gates (escaped dot)
+            "re:.*shared_expert.*",             # All shared expert layers
+            "re:.*shared_expert_gate$",         # Shared expert gates
+            "re:.*linear_attn.*",               # DeltaNet layers (has @torch.fx.wrap)
             "re:.*self_attn.*",                 # Standard attention layers
             "re:.*input_layernorm$",            # Input layer norms
             "re:.*post_attention_layernorm$",   # Post-attention layer norms
             "re:.*norm.*",                      # All normalization layers
+            "re:.*RMSNorm.*",                   # Explicit RMSNorm layers
+            "re:.*rotary.*",                    # Rotary embedding layers
             "re:.*router.*",                    # Expert routing layers
+            "re:mtp.*",                         # MTP (Multi-Token Prediction) layers
+        ],
+        # Custom AWQ mappings for Qwen3-Next hybrid architecture (DeltaNet + Gated Attention)
+        # These mappings define smooth_layer -> balance_layers relationships for AWQ scaling
+        mappings=[
+            # Input layernorm -> attention projections (including DeltaNet linear_attn)
+            AWQMapping(
+                smooth_layer="re:.*input_layernorm$",
+                balance_layers=[
+                    "re:.*self_attn[.]q_proj$",
+                    "re:.*self_attn[.]k_proj$",
+                    "re:.*self_attn[.]v_proj$",
+                    "re:.*linear_attn[.]in_proj_qkvz$",  # DeltaNet QKVZ projection
+                    "re:.*linear_attn[.]in_proj_ba$",    # DeltaNet BA projection
+                ],
+            ),
+            # v_proj -> o_proj (standard attention)
+            AWQMapping(
+                smooth_layer="re:.*self_attn[.]v_proj$",
+                balance_layers=["re:.*self_attn[.]o_proj$"],
+            ),
+            # Post-attention layernorm -> MoE expert gate/up projections
+            AWQMapping(
+                smooth_layer="re:.*post_attention_layernorm$",
+                balance_layers=["re:.*gate_proj$", "re:.*up_proj$"],
+            ),
+            # up_proj -> down_proj (MoE experts)
+            AWQMapping(
+                smooth_layer="re:.*up_proj$",
+                balance_layers=["re:.*down_proj$"],
+            ),
+            # DeltaNet norm -> out_proj (linear attention output)
+            AWQMapping(
+                smooth_layer="re:.*linear_attn[.]norm$",
+                balance_layers=["re:.*linear_attn[.]out_proj$"],
+            ),
         ],
         config_groups={
             "group_0": {
@@ -571,11 +615,12 @@ recipe = [
                     "strategy": "group",    # group-wise quantization
                     "group_size": group_size,  # Dynamic group size from argument
                     "dynamic": False,
+                    "observer": "mse",      # MSE observer for robust scale calculation
                 },
             },
         },
-        # NOTE: Using pipeline="sequential" with tracing_ignore and ignoring linear_attn/self_attn layers
-        # to handle FX tracing issues with @torch.fx.wrap decorators in Qwen3-Coder-Next
+        duo_scaling=True,       # Better weight/activation balance (cyankiwi's approach)
+        offload_device="cpu",   # Explicit CPU offloading for memory efficiency
     ),
 ]
 
@@ -654,59 +699,32 @@ oneshot_kwargs["tracing_ignore"] = [
     "project_per_layer_inputs",
 ]
 
-try:
-    oneshot(**oneshot_kwargs)
-    print("\n✅ Quantization completed successfully!")
-except RuntimeError as e:
-    if "dictionary keys changed during iteration" in str(e):
-        print("\n⚠️  WARNING: Post-processing cleanup failed (known MoE issue)")
-        print("   Quantization completed successfully - continuing to save model...")
-        print(f"   Error details: {e}")
-    else:
-        # Re-raise if it's a different RuntimeError
-        raise
-except Exception as e:
-    # Catch any other exceptions during quantization
-    print(f"\n❌ ERROR during quantization: {e}")
-    import traceback
-    traceback.print_exc()
-    raise
+# Run oneshot quantization
+# NOTE: With proper AWQ mappings and ignore list, this should complete without errors.
+# If "dictionary keys changed during iteration" occurs, it indicates incomplete calibration
+# which will produce corrupted weights with NaN values - do NOT suppress this error.
+oneshot(**oneshot_kwargs)
+print("\n✅ Quantization completed successfully!")
 
 # =========================
-# Cleanup MoE calibration modules (if needed)
+# MoE calibration module cleanup
 # =========================
-# Cleanup MoE calibration modules if they exist
-# This helps prevent issues during save
-try:
-    for name, module in model.named_modules():
-        # Check for any calibration wrapper modules that might need cleanup
-        module_type = type(module).__name__
-        if 'Calibration' in module_type and hasattr(module, '_original'):
-            # Try to restore original if needed
-            pass  # Usually handled automatically
-except Exception as e:
-    print(f"Note: Could not clean up calibration modules: {e}")
+# With proper AWQ mappings, calibration modules are automatically restored
+# by the moe_calibration_context after calibration completes.
+# The CalibrationQwen3NextSparseMoeBlock has is_permanent=False, so it auto-restores.
 
 # =========================
-# Ensure model is on CPU before saving (with error handling)
+# Ensure model is on CPU before saving
 # =========================
-# Ensure model is on CPU before saving (should already be there with device_map=None)
-# CRITICAL: Wrap in try-except because model.cpu() can trigger the same RuntimeError
-# when iterating over MoE model buffers
-try:
-    if hasattr(model, 'device') and str(model.device) != 'cpu':
-        print("Moving model to CPU before saving...")
-        model = model.cpu()
-    elif hasattr(model, 'hf_device_map'):
-        # Model is distributed - ensure all parts are on CPU
-        print("Ensuring distributed model is on CPU...")
-        model = model.cpu()
-except RuntimeError as e:
-    if "dictionary keys changed during iteration" in str(e):
-        print("⚠️  Note: Could not verify CPU placement (same MoE buffer issue)")
-        print("   Model should already be on CPU (device_map=None) - proceeding with save")
-    else:
-        raise
+# Model should already be on CPU since we used device_map=None
+# With proper AWQ configuration, no RuntimeError should occur here
+if hasattr(model, 'device') and str(model.device) != 'cpu':
+    print("Moving model to CPU before saving...")
+    model = model.cpu()
+elif hasattr(model, 'hf_device_map'):
+    # Model is distributed - ensure all parts are on CPU
+    print("Ensuring distributed model is on CPU...")
+    model = model.cpu()
 
 # =========================
 # Save compressed model
