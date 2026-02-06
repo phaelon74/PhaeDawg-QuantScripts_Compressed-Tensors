@@ -8,7 +8,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier
-from llmcompressor.modifiers.awq.mappings import AWQMapping
+# NOTE: We do NOT use AWQMapping directly - let AWQModifier auto-detect mappings
+# Passing AWQMapping objects causes all layers to match as a single group (ValueError)
 
 # =========================
 # Qwen3-Coder-Next Quantization Strategy
@@ -539,18 +540,22 @@ print_moe_calibration_guidance(model, NUM_CALIBRATION_SAMPLES, MAX_SEQUENCE_LENG
 # AWQ recipe with dictionary-based config_groups
 #  - Weight-only INT4 (W4A16 **symmetric**)
 #  - Dynamic group_size from argument
-#  - Custom AWQ mappings for Qwen3-Next DeltaNet (linear_attn) architecture
+#  - Let AWQModifier auto-detect mappings from model architecture
 #  - Ignore layers to avoid FX tracing issues and preserve accuracy
 #
 # This recipe follows cyankiwi's successful Qwen3-Next-80B-A3B AWQ quantization:
 # https://huggingface.co/cyankiwi/Qwen3-Next-80B-A3B-Instruct-AWQ-4bit
 #
-# Key differences from standard AWQ:
-#  1. Custom mappings for DeltaNet linear_attn layers (in_proj_qkvz, in_proj_ba, out_proj)
-#  2. Extended ignore list including embed_tokens, rotary, RMSNorm, mtp layers
-#  3. MSE observer for more robust scale calculation
-#  4. duo_scaling=True for better weight/activation balance
-#  5. offload_device="cpu" for memory efficiency with large MoE models
+# NOTE: We do NOT specify custom mappings - AWQModifier.get_layer_mappings_from_architecture()
+# auto-detects the correct smooth_layer -> balance_layer mappings per-layer.
+# The recipe.yaml from cyankiwi is the SAVED OUTPUT after quantization, not the input.
+# Passing AWQMapping objects directly causes all layers to match as a single group.
+#
+# Key settings from cyankiwi:
+#  1. Extended ignore list including embed_tokens, rotary, RMSNorm, mtp layers
+#  2. MSE observer for more robust scale calculation
+#  3. duo_scaling=True for better weight/activation balance
+#  4. offload_device="cpu" for memory efficiency with large MoE models
 # =========================
 recipe = [
     AWQModifier(
@@ -570,41 +575,8 @@ recipe = [
             "re:.*router.*",                    # Expert routing layers
             "re:mtp.*",                         # MTP (Multi-Token Prediction) layers
         ],
-        # Custom AWQ mappings for Qwen3-Next hybrid architecture (DeltaNet + Gated Attention)
-        # These mappings define smooth_layer -> balance_layers relationships for AWQ scaling
-        mappings=[
-            # Input layernorm -> attention projections (including DeltaNet linear_attn)
-            AWQMapping(
-                smooth_layer="re:.*input_layernorm$",
-                balance_layers=[
-                    "re:.*self_attn[.]q_proj$",
-                    "re:.*self_attn[.]k_proj$",
-                    "re:.*self_attn[.]v_proj$",
-                    "re:.*linear_attn[.]in_proj_qkvz$",  # DeltaNet QKVZ projection
-                    "re:.*linear_attn[.]in_proj_ba$",    # DeltaNet BA projection
-                ],
-            ),
-            # v_proj -> o_proj (standard attention)
-            AWQMapping(
-                smooth_layer="re:.*self_attn[.]v_proj$",
-                balance_layers=["re:.*self_attn[.]o_proj$"],
-            ),
-            # Post-attention layernorm -> MoE expert gate/up projections
-            AWQMapping(
-                smooth_layer="re:.*post_attention_layernorm$",
-                balance_layers=["re:.*gate_proj$", "re:.*up_proj$"],
-            ),
-            # up_proj -> down_proj (MoE experts)
-            AWQMapping(
-                smooth_layer="re:.*up_proj$",
-                balance_layers=["re:.*down_proj$"],
-            ),
-            # DeltaNet norm -> out_proj (linear attention output)
-            AWQMapping(
-                smooth_layer="re:.*linear_attn[.]norm$",
-                balance_layers=["re:.*linear_attn[.]out_proj$"],
-            ),
-        ],
+        # NOTE: mappings=None (default) - let AWQModifier auto-detect per-layer mappings
+        # from the model architecture using get_layer_mappings_from_architecture()
         config_groups={
             "group_0": {
                 "targets": ["Linear"],
