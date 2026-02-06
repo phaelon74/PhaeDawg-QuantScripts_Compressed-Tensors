@@ -546,20 +546,38 @@ print_moe_calibration_guidance(model, NUM_CALIBRATION_SAMPLES, MAX_SEQUENCE_LENG
 # This recipe follows cyankiwi's successful Qwen3-Next-80B-A3B AWQ quantization:
 # https://huggingface.co/cyankiwi/Qwen3-Next-80B-A3B-Instruct-AWQ-4bit
 #
-# NOTE: We do NOT specify custom mappings - AWQModifier.get_layer_mappings_from_architecture()
-# auto-detects the correct smooth_layer -> balance_layer mappings per-layer.
-# The recipe.yaml from cyankiwi is the SAVED OUTPUT after quantization, not the input.
-# Passing AWQMapping objects directly causes all layers to match as a single group.
+# STRATEGY: Only quantize MoE expert layers (gate_proj, up_proj, down_proj).
+# All attention, DeltaNet, normalization, embedding, rotary, and MTP layers
+# are excluded via the ignore list. This matches cyankiwi's saved recipe.yaml
+# which shows only expert layers were quantized in the final model.
 #
-# Key settings from cyankiwi:
-#  1. Extended ignore list including embed_tokens, rotary, RMSNorm, mtp layers
-#  2. MSE observer for more robust scale calculation
+# With group_size=32, small layers (e.g. linear_attn.in_proj_ba, dim=64)
+# get only 2 groups, destroying precision. MoE experts (dim=512) get 16
+# groups which is plenty for accurate INT4 scales.
+#
+# Key settings:
+#  1. Extended ignore list - only MoE expert layers are quantized
+#  2. MSE observer for robust scale calculation
 #  3. duo_scaling=True for better weight/activation balance
 #  4. offload_device="cpu" for memory efficiency with large MoE models
 # =========================
 recipe = [
     AWQModifier(
-        ignore=["lm_head", "re:.*mlp.gate$", "re:.*mlp.shared_expert_gate$"],
+        ignore=[
+            "lm_head",                          # Output head
+            "model.embed_tokens",               # Embedding layer
+            "re:.*mlp[.]gate$",                 # MoE router gates
+            "re:.*mlp[.]shared_expert_gate$",   # Shared expert gates
+            "re:.*self_attn.*",                 # All Gated Attention layers (q/k/v/o_proj)
+            "re:.*linear_attn.*",               # All DeltaNet layers (in_proj_qkvz/ba, out_proj)
+            "re:.*input_layernorm$",            # Input layer norms
+            "re:.*post_attention_layernorm$",   # Post-attention layer norms
+            "re:.*norm.*",                      # All normalization layers
+            "re:.*RMSNorm.*",                   # Explicit RMSNorm layers
+            "re:.*rotary.*",                    # Rotary positional embeddings
+            "re:.*router.*",                    # Expert routing layers
+            "re:mtp.*",                         # Multi-Token Prediction layers
+        ],
         # NOTE: mappings=None (default) - let AWQModifier auto-detect per-layer mappings
         # from the model architecture using get_layer_mappings_from_architecture()
         config_groups={
