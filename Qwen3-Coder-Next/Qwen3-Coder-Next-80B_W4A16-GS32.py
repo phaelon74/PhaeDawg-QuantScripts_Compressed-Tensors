@@ -559,22 +559,7 @@ print_moe_calibration_guidance(model, NUM_CALIBRATION_SAMPLES, MAX_SEQUENCE_LENG
 # =========================
 recipe = [
     AWQModifier(
-        ignore=[
-            "model.embed_tokens",               # Embedding layer
-            "lm_head",                          # Output head
-            "re:.*mlp[.]gate$",                 # MoE router gates (escaped dot)
-            "re:.*shared_expert.*",             # All shared expert layers
-            "re:.*shared_expert_gate$",         # Shared expert gates
-            "re:.*linear_attn.*",               # DeltaNet layers (has @torch.fx.wrap)
-            "re:.*self_attn.*",                 # Standard attention layers
-            "re:.*input_layernorm$",            # Input layer norms
-            "re:.*post_attention_layernorm$",   # Post-attention layer norms
-            "re:.*norm.*",                      # All normalization layers
-            "re:.*RMSNorm.*",                   # Explicit RMSNorm layers
-            "re:.*rotary.*",                    # Rotary embedding layers
-            "re:.*router.*",                    # Expert routing layers
-            "re:mtp.*",                         # MTP (Multi-Token Prediction) layers
-        ],
+        ignore=["lm_head", "re:.*mlp.gate$", "re:.*mlp.shared_expert_gate$"],
         # NOTE: mappings=None (default) - let AWQModifier auto-detect per-layer mappings
         # from the model architecture using get_layer_mappings_from_architecture()
         config_groups={
