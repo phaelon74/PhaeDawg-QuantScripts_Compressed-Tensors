@@ -416,6 +416,9 @@ oneshot(
     max_seq_length=MAX_SEQUENCE_LENGTH,
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
     tokenizer=tokenizer,
+    # Explicit sequential targets to bypass _get_no_split_modules() which
+    # was renamed to _no_split_modules in transformers 5.x
+    sequential_targets=["Glm4MoeLiteDecoderLayer"],
 )
 
 # =========================
