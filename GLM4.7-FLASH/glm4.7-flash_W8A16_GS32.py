@@ -19,6 +19,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier
+from llmcompressor.modifiers.awq.mappings import AWQMapping
 from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
 
 from glm4_moe_lite_v2 import CalibrationGlm4MoeLiteMoE  # noqa: F401
@@ -123,9 +124,14 @@ def replace_moe_modules_for_calibration(model):
 # =========================
 MODEL_ID = model_path
 
-config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
-print(f"Model config type: {type(config).__name__}")
-print(f"Model type: {getattr(config, 'model_type', 'unknown')}")
+# Optional: log model config (non-blocking if transformers version mismatch)
+try:
+    config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
+    print(f"Model config type: {type(config).__name__}")
+    print(f"Model type: {getattr(config, 'model_type', 'unknown')}")
+except (ValueError, KeyError) as e:
+    print(f"Note: AutoConfig could not resolve model type (may need newer transformers): {e}")
+    print("Proceeding with model loading anyway...")
 
 model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto", trust_remote_code=True)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
@@ -367,9 +373,34 @@ quant_scheme = QuantizationScheme(
     output_activations=None,
 )
 
+# AWQ Mappings for GLM-4.7-Flash (MLA + MoE architecture)
+# GLM-4.7-Flash uses Multi-head Latent Attention (same as DeepSeek-V3):
+#   q_a_proj, q_b_proj, kv_a_proj_with_mqa, kv_b_proj instead of q/k/v_proj
+# The default AWQ mappings assume standard q/k/v_proj and will fail.
+glm4_moe_lite_mappings = [
+    # MLA: input_layernorm feeds into q_a_proj and kv_a_proj_with_mqa
+    AWQMapping(
+        "re:.*input_layernorm$",
+        ["re:.*(q|q_a)_proj$", "re:.*kv_a_proj_with_mqa$"],
+    ),
+    # MLA: q_a_layernorm feeds into q_b_proj
+    AWQMapping("re:.*q_a_layernorm$", ["re:.*q_b_proj$"]),
+    # MLA: kv_a_layernorm feeds into kv_b_proj
+    AWQMapping("re:.*kv_a_layernorm$", ["re:.*kv_b_proj$"]),
+    # MLP: post_attention_layernorm feeds into gate_proj and up_proj
+    # (matches dense layer 0, MoE experts, and shared_experts)
+    AWQMapping(
+        "re:.*post_attention_layernorm$",
+        ["re:.*gate_proj$", "re:.*up_proj$"],
+    ),
+    # MLP: up_proj feeds into down_proj
+    AWQMapping("re:.*up_proj$", ["re:.*down_proj$"]),
+]
+
 recipe = [
     AWQModifier(
         ignore=ignore_list,
+        mappings=glm4_moe_lite_mappings,
         config_groups={"group_0": quant_scheme},
     ),
 ]

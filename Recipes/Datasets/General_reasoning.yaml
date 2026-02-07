@@ -107,16 +107,17 @@ calibration_set:
 
     # Interactive coding challenges
     - dataset: CSJianYang/CodeArena
-      split: train
+      split: test
       columns: [messages]
       formatter: chat_completion
       num_samples: 15
 
-    # Competitive programming (C++ focused)
-    - dataset: nvidia/Nemotron-Competitive-Programming-v1
-      split: competitive_coding_cpp_part_00
-      columns: [messages]
-      formatter: chat_completion
+    # Code reasoning and algebra
+    - dataset: sr5434/CodegebraGPT_data
+      subset: 100k-text
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
       num_samples: 15
 
 
