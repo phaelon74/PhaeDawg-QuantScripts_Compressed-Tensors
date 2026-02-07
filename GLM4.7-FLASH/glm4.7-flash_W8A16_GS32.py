@@ -28,6 +28,34 @@ print("Imported CalibrationGlm4MoeLiteMoE v2 - produces vLLM-compatible expert n
 
 
 # =========================
+# Monkey-patch: fix fused global scales for MLA attention
+# =========================
+# The upstream function blindly accesses submodule.q_proj/k_proj/v_proj
+# which don't exist in MLA attention (GLM-4.7-Flash uses q_a_proj, q_b_proj,
+# kv_a_proj_with_mqa, kv_b_proj). This is an NVFP4-specific optimization
+# that doesn't apply to our INT8 quantization anyway.
+import llmcompressor.modifiers.utils.helpers as _awq_helpers
+
+_orig_update_fused = _awq_helpers.update_fused_layer_weight_global_scales
+
+def _safe_update_fused_layer_weight_global_scales(submodule):
+    """Wrapper that skips MLA attention modules lacking q_proj/k_proj/v_proj."""
+    if not (hasattr(submodule, 'q_proj') and hasattr(submodule, 'k_proj') and hasattr(submodule, 'v_proj')):
+        # MLA attention — skip the QKV fusing (only relevant for NVFP4 anyway)
+        if hasattr(submodule, 'gate_proj') and hasattr(submodule, 'up_proj'):
+            # Still handle MLP fusing if applicable
+            try:
+                _orig_update_fused(submodule)
+            except AttributeError:
+                pass
+        return
+    _orig_update_fused(submodule)
+
+_awq_helpers.update_fused_layer_weight_global_scales = _safe_update_fused_layer_weight_global_scales
+print("Patched update_fused_layer_weight_global_scales for MLA attention compatibility")
+
+
+# =========================
 # Parse Command-Line Arguments
 # =========================
 parser = argparse.ArgumentParser(
