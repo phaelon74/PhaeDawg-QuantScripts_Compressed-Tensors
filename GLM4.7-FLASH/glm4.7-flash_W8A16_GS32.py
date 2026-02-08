@@ -35,23 +35,37 @@ print("Imported CalibrationGlm4MoeLiteMoE v2 - produces vLLM-compatible expert n
 # kv_a_proj_with_mqa, kv_b_proj). This is an NVFP4-specific optimization
 # that doesn't apply to our INT8 quantization anyway.
 import llmcompressor.modifiers.utils.helpers as _awq_helpers
+import llmcompressor.modifiers.awq.base as _awq_base
+
+def _safe_update_fused_layer_weight_global_scales(submodule):
+    """Wrapper that skips MLA attention modules lacking q_proj/k_proj/v_proj.
+
+    The upstream function blindly does [submodule.q_proj, submodule.v_proj, submodule.k_proj]
+    which crashes on MLA attention (GLM-4.7-Flash uses q_a_proj, q_b_proj,
+    kv_a_proj_with_mqa, kv_b_proj instead).
+    This fusing step is only relevant for NVFP4 TENSOR_GROUP quantization, not our INT8.
+    """
+    # Skip entirely for MLA attention that lacks standard QKV projections
+    has_standard_qkv = (
+        hasattr(submodule, 'q_proj')
+        and hasattr(submodule, 'k_proj')
+        and hasattr(submodule, 'v_proj')
+    )
+    has_fused_qkv = hasattr(submodule, 'qkv_proj')
+
+    if not has_standard_qkv and not has_fused_qkv:
+        return  # MLA attention — nothing to fuse
+    # For standard attention or MLP modules, delegate to original
+    try:
+        _orig_update_fused(submodule)
+    except AttributeError:
+        pass  # Safety net
 
 _orig_update_fused = _awq_helpers.update_fused_layer_weight_global_scales
 
-def _safe_update_fused_layer_weight_global_scales(submodule):
-    """Wrapper that skips MLA attention modules lacking q_proj/k_proj/v_proj."""
-    if not (hasattr(submodule, 'q_proj') and hasattr(submodule, 'k_proj') and hasattr(submodule, 'v_proj')):
-        # MLA attention — skip the QKV fusing (only relevant for NVFP4 anyway)
-        if hasattr(submodule, 'gate_proj') and hasattr(submodule, 'up_proj'):
-            # Still handle MLP fusing if applicable
-            try:
-                _orig_update_fused(submodule)
-            except AttributeError:
-                pass
-        return
-    _orig_update_fused(submodule)
-
+# Patch in BOTH places: the helpers module AND the awq.base module's local reference
 _awq_helpers.update_fused_layer_weight_global_scales = _safe_update_fused_layer_weight_global_scales
+_awq_base.update_fused_layer_weight_global_scales = _safe_update_fused_layer_weight_global_scales
 print("Patched update_fused_layer_weight_global_scales for MLA attention compatibility")
 
 
