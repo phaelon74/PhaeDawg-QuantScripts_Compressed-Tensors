@@ -7,9 +7,7 @@ from datasets import load_dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor import oneshot
-from llmcompressor.modifiers.awq import AWQModifier
-# NOTE: We do NOT use AWQMapping directly - let AWQModifier auto-detect mappings
-# Passing AWQMapping objects causes all layers to match as a single group (ValueError)
+from llmcompressor.modifiers.awq import AWQModifier, AWQMapping
 
 # =========================
 # Qwen3-Coder-Next Quantization Strategy
@@ -568,6 +566,7 @@ recipe = [
             "model.embed_tokens",               # Embedding layer
             "re:.*mlp[.]gate$",                 # MoE router gates
             "re:.*mlp[.]shared_expert_gate$",   # Shared expert gates
+            "re:.*shared_expert.*",             # All shared expert layers (always active, too sensitive to quantize)
             "re:.*self_attn.*",                 # All Gated Attention layers (q/k/v/o_proj)
             "re:.*linear_attn.*",               # All DeltaNet layers (in_proj_qkvz/ba, out_proj)
             "re:.*input_layernorm$",            # Input layer norms
@@ -578,8 +577,28 @@ recipe = [
             "re:.*router.*",                    # Expert routing layers
             "re:mtp.*",                         # Multi-Token Prediction layers
         ],
-        # NOTE: mappings=None (default) - let AWQModifier auto-detect per-layer mappings
-        # from the model architecture using get_layer_mappings_from_architecture()
+        # Explicit mappings scoped to model.layers only (excludes MTP layers).
+        # Newer compressed-tensors (0.13.1a+) has stricter match_modules_set that
+        # fails on auto-detected mappings because MTP layers have shared_expert
+        # but no regular experts, creating incomplete sets.
+        # Only two mappings matter since we only quantize MoE expert layers:
+        #   1. post_attention_layernorm -> expert gate_proj/up_proj (smooth norm into experts)
+        #   2. expert up_proj -> expert down_proj (within-expert smoothing)
+        mappings=[
+            AWQMapping(
+                smooth_layer="re:^model\\.layers\\.\\d+\\.post_attention_layernorm$",
+                balance_layers=[
+                    "re:^model\\.layers\\.\\d+\\.mlp\\.experts\\.\\d+\\.gate_proj$",
+                    "re:^model\\.layers\\.\\d+\\.mlp\\.experts\\.\\d+\\.up_proj$",
+                ],
+            ),
+            AWQMapping(
+                smooth_layer="re:^model\\.layers\\.\\d+\\.mlp\\.experts\\.\\d+\\.up_proj$",
+                balance_layers=[
+                    "re:^model\\.layers\\.\\d+\\.mlp\\.experts\\.\\d+\\.down_proj$",
+                ],
+            ),
+        ],
         config_groups={
             "group_0": {
                 "targets": ["Linear"],
@@ -651,7 +670,6 @@ oneshot_kwargs = {
     "tokenizer": tokenizer,
     "pipeline": "sequential",  # Use sequential pipeline for memory efficiency
     "moe_calibrate_all_experts": True,  # Ensure all 512 experts receive calibration samples
-    "batch_size": 16,
 }
 
 # Add sequential_targets if detected
