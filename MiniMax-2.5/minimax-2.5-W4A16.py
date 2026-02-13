@@ -153,6 +153,12 @@ print(f"Model config type: {type(config).__name__}")
 model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto", trust_remote_code=True)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
+# FX tracing fix: quantization_config contains QuantizationMethod.FP8 enum which fails to serialize.
+# Remove it so llmcompressor's trace_subgraphs can capture the model graph.
+if hasattr(model.config, "quantization_config") and model.config.quantization_config is not None:
+    model.config.quantization_config = None
+    print("Cleared quantization_config for FX tracing compatibility")
+
 # Replace MoE modules so ALL experts are activated during calibration
 model = replace_moe_modules_for_calibration(model)
 
