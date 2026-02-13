@@ -154,10 +154,21 @@ model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto", trust
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 # FX tracing fix: quantization_config contains QuantizationMethod.FP8 enum which fails to serialize.
-# Remove it so llmcompressor's trace_subgraphs can capture the model graph.
+# Replace with a plain dict (no enums) so trace_subgraphs can capture the model graph.
 if hasattr(model.config, "quantization_config") and model.config.quantization_config is not None:
-    model.config.quantization_config = None
-    print("Cleared quantization_config for FX tracing compatibility")
+    _qc = model.config.quantization_config
+    _qm = getattr(_qc, "quant_method", "fp8")
+    if hasattr(_qm, "value"):
+        _qm = _qm.value
+    model.config.quantization_config = {
+        "quant_method": str(_qm),
+        "modules_to_not_convert": list(getattr(_qc, "modules_to_not_convert", ["gate", "e_score_correction_bias", "lm_head"])),
+        "activation_scheme": str(getattr(_qc, "activation_scheme", "dynamic")),
+        "fmt": str(getattr(_qc, "fmt", "float8_e4m3fn")),
+    }
+    if hasattr(_qc, "weight_block_size") and _qc.weight_block_size:
+        model.config.quantization_config["weight_block_size"] = list(_qc.weight_block_size)
+    print("Sanitized quantization_config for FX tracing compatibility")
 
 # Replace MoE modules so ALL experts are activated during calibration
 model = replace_moe_modules_for_calibration(model)
@@ -458,6 +469,19 @@ oneshot(
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
     tokenizer=tokenizer,
     moe_calibrate_all_experts=True,  # Ensure all experts receive calibration (with our manual replacement)
+    tracing_ignore=[
+        "_update_causal_mask",
+        "create_causal_mask",
+        "create_sliding_window_causal_mask",
+        "_update_mamba_mask",
+        "make_causal_mask",
+        "get_causal_mask",
+        "mask_interface",
+        "mask_function",
+        "_prepare_4d_causal_attention_mask",
+        "_prepare_fsmt_decoder_inputs",
+        "_prepare_4d_causal_attention_mask_with_cache_position",
+    ],
 )
 
 # =========================
