@@ -17,6 +17,27 @@ import torch.nn as nn
 from datasets import load_dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
+# Transformers v5 compatibility: TORCH_INIT_FUNCTIONS was removed in v5
+# llm-compressor still imports it; inject if missing (see vllm-project/llm-compressor#2328)
+import transformers.modeling_utils as _tmu
+if not hasattr(_tmu, "TORCH_INIT_FUNCTIONS"):
+    _tmu.TORCH_INIT_FUNCTIONS = {
+        "uniform_": nn.init.uniform_,
+        "normal_": nn.init.normal_,
+        "trunc_normal_": nn.init.trunc_normal_,
+        "constant_": nn.init.constant_,
+        "xavier_uniform_": nn.init.xavier_uniform_,
+        "xavier_normal_": nn.init.xavier_normal_,
+        "kaiming_uniform_": nn.init.kaiming_uniform_,
+        "kaiming_normal_": nn.init.kaiming_normal_,
+        "uniform": nn.init.uniform,
+        "normal": nn.init.normal,
+        "xavier_uniform": nn.init.xavier_uniform,
+        "xavier_normal": nn.init.xavier_normal,
+        "kaiming_uniform": nn.init.kaiming_uniform,
+        "kaiming_normal": nn.init.kaiming_normal,
+    }
+
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier
 from llmcompressor.modifiers.awq.mappings import AWQMapping
