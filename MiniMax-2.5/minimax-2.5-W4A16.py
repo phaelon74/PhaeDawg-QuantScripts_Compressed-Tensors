@@ -12,6 +12,7 @@ Only MoE expert layers (w1, w2, w3) are quantized; attention, gate, norms, lm_he
 
 import argparse
 import yaml
+import torch
 
 from datasets import load_dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
@@ -150,7 +151,26 @@ MODEL_ID = model_path
 config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
 print(f"Model config type: {type(config).__name__}")
 
-model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto", trust_remote_code=True)
+# Load in BF16 - model may be stored as FP8 on HF; AWQ observers need BF16/FP16 (torch.amin fails on Float8_e4m3fn)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    torch_dtype=torch.bfloat16,
+    trust_remote_code=True,
+)
+
+
+# Ensure no FP8 weights (HF model may have them; torch.amin not implemented for Float8_e4m3fn)
+_fp8_dtypes = tuple(
+    getattr(torch, d, None) for d in ("float8_e4m3fn", "float8_e5m2") if hasattr(torch, d)
+)
+if _fp8_dtypes:
+    fp8_count = 0
+    for name, param in model.named_parameters():
+        if param.dtype in _fp8_dtypes:
+            param.data = param.data.to(torch.bfloat16)
+            fp8_count += 1
+    if fp8_count:
+        print(f"Converted {fp8_count} FP8 parameter(s) to bfloat16 for AWQ compatibility")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 # FX tracing fix: quantization_config contains QuantizationMethod.FP8 enum which fails to serialize.
@@ -429,28 +449,31 @@ recipe = [
             "re:.*e_score_correction_bias",
             "re:.*self_attn.*",        # q_proj, k_proj, v_proj, o_proj, q_norm, k_norm
             "re:.*input_layernorm",
-            "re:.*post_attention_layernorm",
-            "re:.*\\.norm$",             # model.norm
-            "re:.*RMSNorm.*",
+            # NOTE: Do NOT ignore post_attention_layernorm - AWQ smoothing needs it as smooth_layer
+            "re:.*\\.norm$",             # model.norm (final) - ends with .norm
             "re:.*rotary.*",
             "re:.*mtp.*",                # Multi-Token Prediction layers (use_mtp)
         ],
+        # Mappings must match module names as seen by the sequential pipeline.
+        # In subgraph mode, names can be relative (e.g. block_sparse_moe.experts.0.w1).
+        # Use permissive .* prefix to match both full and relative paths.
         mappings=[
             AWQMapping(
-                smooth_layer="re:^model\\.model\\.layers\\.\\d+\\.post_attention_layernorm$",
+                smooth_layer="re:.*post_attention_layernorm$",
                 balance_layers=[
-                    "re:^model\\.model\\.layers\\.\\d+\\.block_sparse_moe\\.experts\\.\\d+\\.w1$",
-                    "re:^model\\.model\\.layers\\.\\d+\\.block_sparse_moe\\.experts\\.\\d+\\.w3$",
+                    "re:.*block_sparse_moe\\.experts\\.\\d+\\.w1$",
+                    "re:.*block_sparse_moe\\.experts\\.\\d+\\.w3$",
                 ],
             ),
             AWQMapping(
-                smooth_layer="re:^model\\.model\\.layers\\.\\d+\\.block_sparse_moe\\.experts\\.\\d+\\.w3$",
+                smooth_layer="re:.*block_sparse_moe\\.experts\\.\\d+\\.w3$",
                 balance_layers=[
-                    "re:^model\\.model\\.layers\\.\\d+\\.block_sparse_moe\\.experts\\.\\d+\\.w2$",
+                    "re:.*block_sparse_moe\\.experts\\.\\d+\\.w2$",
                 ],
             ),
         ],
         config_groups={"group_0": quant_scheme},
+        duo_scaling=True,       # Better weight/activation balance (per Qwen3/cyankiwi approach)
     ),
 ]
 
