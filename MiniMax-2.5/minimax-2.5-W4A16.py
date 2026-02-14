@@ -152,10 +152,12 @@ config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
 print(f"Model config type: {type(config).__name__}")
 
 # Load in BF16 - model may be stored as FP8 on HF; AWQ observers need BF16/FP16 (torch.amin fails on Float8_e4m3fn)
+# device_map=None for sequential pipeline (loads to CPU, processes layers one-by-one to GPU)
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
-    torch_dtype=torch.bfloat16,
+    dtype=torch.bfloat16,  # was torch_dtype (deprecated)
     trust_remote_code=True,
+    device_map=None,
 )
 
 
