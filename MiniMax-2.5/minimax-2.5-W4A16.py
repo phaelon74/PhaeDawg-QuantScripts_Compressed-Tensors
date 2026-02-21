@@ -526,5 +526,36 @@ SAVE_DIR = output_path
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 
+# =========================
+# VLLM compatibility: Rename weight_scale_inv -> weight_scale for MoE experts
+# =========================
+# VLLM's FusedMoE expects params named w13_weight_scale / w2_weight_scale, but
+# compressed-tensors saves weight_scale_inv. The minimax_m2 loader maps
+# experts.0.w1 -> experts.w13 and looks up params_dict[name]; the model has
+# experts.w13_weight_scale (no _inv). Rename checkpoint keys so the lookup succeeds.
+import glob
+from pathlib import Path
+from safetensors import safe_open
+from safetensors.torch import save_file
+
+st_files = list(Path(SAVE_DIR).glob("*.safetensors"))
+renamed_count = 0
+for st_path in st_files:
+    tensors = {}
+    keys_to_rename = []
+    with safe_open(st_path, framework="pt", device="cpu") as f:
+        for key in f.keys():
+            tensors[key] = f.get_tensor(key)
+            if "block_sparse_moe.experts." in key and "_weight_scale_inv" in key:
+                keys_to_rename.append(key)
+    if keys_to_rename:
+        for old_key in keys_to_rename:
+            new_key = old_key.replace("_weight_scale_inv", "_weight_scale")
+            tensors[new_key] = tensors.pop(old_key)
+            renamed_count += 1
+        save_file(tensors, st_path)
+if renamed_count:
+    print(f"Renamed {renamed_count} MoE expert scale keys for VLLM compatibility")
+
 print("\n=== Complete ===")
 print("Saved to:", SAVE_DIR)
