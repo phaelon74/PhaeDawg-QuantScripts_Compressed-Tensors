@@ -54,7 +54,7 @@ def main():
         with safe_open(st_path, framework="pt", device="cpu") as f:
             for key in f.keys():
                 tensors[key] = f.get_tensor(key)
-                if ("block_sparse_moe.experts." in key or "mlp.experts." in key) and "_weight_scale_inv" in key:
+                if ("block_sparse_moe.experts." in key or "mlp.experts." in key) and "weight_scale_inv" in key:
                     keys_to_rename.append(key)
 
         if keys_to_rename:
@@ -62,12 +62,12 @@ def main():
             if args.dry_run:
                 print(f"\n{st_path.name}: would rename {len(keys_to_rename)} keys")
                 for k in keys_to_rename[:5]:
-                    print(f"  {k} -> {k.replace('_weight_scale_inv', '_weight_scale')}")
+                    print(f"  {k} -> {k.replace('weight_scale_inv', 'weight_scale')}")
                 if len(keys_to_rename) > 5:
                     print(f"  ... and {len(keys_to_rename) - 5} more")
             else:
                 for old_key in keys_to_rename:
-                    new_key = old_key.replace("_weight_scale_inv", "_weight_scale")
+                    new_key = old_key.replace("weight_scale_inv", "weight_scale")
                     tensors[new_key] = tensors.pop(old_key)
                 save_file(tensors, st_path)
                 print(f"Renamed {len(keys_to_rename)} keys in {st_path.name}")
@@ -75,7 +75,7 @@ def main():
 
     if not found_any:
         # Diagnostic: show sample keys from first file
-        print("\nNo keys matched '(block_sparse_moe|mlp).experts.' and '_weight_scale_inv'.")
+        print("\nNo keys matched '(block_sparse_moe|mlp).experts.' and 'weight_scale_inv'.")
         print("Sample keys from first file:")
         with safe_open(st_files[0], framework="pt", device="cpu") as f:
             keys = list(f.keys())
