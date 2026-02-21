@@ -527,35 +527,32 @@ model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 
 # =========================
-# VLLM compatibility: Rename weight_scale_inv -> weight_scale for MoE experts
+# VLLM compatibility: Remove weight_scale_inv keys for MoE experts
 # =========================
-# VLLM's FusedMoE expects params named w13_weight_scale / w2_weight_scale, but
-# compressed-tensors saves weight_scale_inv. The minimax_m2 loader maps
-# experts.0.w1 -> experts.w13 and looks up params_dict[name]; the model has
-# experts.w13_weight_scale (no _inv). Rename checkpoint keys so the lookup succeeds.
-import glob
+# VLLM's loader fails (KeyError) when it sees weight_scale_inv. The checkpoint
+# has both weight_scale (correct shape) and weight_scale_inv. Remove _inv keys
+# so the loader uses weight_scale only. Do NOT overwrite - that causes shape mismatch.
 from pathlib import Path
 from safetensors import safe_open
 from safetensors.torch import save_file
 
 st_files = list(Path(SAVE_DIR).glob("*.safetensors"))
-renamed_count = 0
+removed_count = 0
 for st_path in st_files:
     tensors = {}
-    keys_to_rename = []
+    keys_to_remove = []
     with safe_open(st_path, framework="pt", device="cpu") as f:
         for key in f.keys():
             tensors[key] = f.get_tensor(key)
-            if "block_sparse_moe.experts." in key and "_weight_scale_inv" in key:
-                keys_to_rename.append(key)
-    if keys_to_rename:
-        for old_key in keys_to_rename:
-            new_key = old_key.replace("_weight_scale_inv", "_weight_scale")
-            tensors[new_key] = tensors.pop(old_key)
-            renamed_count += 1
+            if "block_sparse_moe.experts." in key and "weight_scale_inv" in key:
+                keys_to_remove.append(key)
+    if keys_to_remove:
+        for k in keys_to_remove:
+            del tensors[k]
         save_file(tensors, st_path)
-if renamed_count:
-    print(f"Renamed {renamed_count} MoE expert scale keys for VLLM compatibility")
+        removed_count += len(keys_to_remove)
+if removed_count:
+    print(f"Removed {removed_count} weight_scale_inv keys for VLLM compatibility")
 
 print("\n=== Complete ===")
 print("Saved to:", SAVE_DIR)

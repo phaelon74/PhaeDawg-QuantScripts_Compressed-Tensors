@@ -2,9 +2,10 @@
 """
 Fix MiniMax-M2.5 W4A16 checkpoint for VLLM compatibility.
 
-VLLM's FusedMoE expects params named w13_weight_scale / w2_weight_scale, but
-compressed-tensors saves weight_scale_inv. This script renames checkpoint keys
-so VLLM can load the quantized model.
+VLLM's FusedMoE loader looks up params by name; when it sees weight_scale_inv
+it fails (KeyError). The checkpoint has both weight_scale (correct shape) and
+weight_scale_inv. We REMOVE weight_scale_inv keys so the loader uses weight_scale.
+Do NOT overwrite weight_scale with weight_scale_inv - that causes shape mismatch.
 
 Usage:
     python fix_minimax_vllm_checkpoint.py /path/to/W4A16_GS32/
@@ -20,7 +21,7 @@ from safetensors.torch import save_file
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Rename MoE expert scale keys in MiniMax checkpoint for VLLM."
+        description="Remove MoE expert weight_scale_inv keys for VLLM (use weight_scale)."
     )
     parser.add_argument(
         "checkpoint_dir",
@@ -30,7 +31,7 @@ def main():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Only show what would be renamed, do not modify files",
+        help="Only show what would be removed, do not modify files",
     )
     args = parser.parse_args()
 
@@ -46,36 +47,35 @@ def main():
 
     print(f"Found {len(st_files)} safetensors files in {save_dir}")
 
-    total_renamed = 0
+    total_removed = 0
     found_any = False
     for st_path in st_files:
         tensors = {}
-        keys_to_rename = []
+        keys_to_remove = []
         with safe_open(st_path, framework="pt", device="cpu") as f:
             for key in f.keys():
                 tensors[key] = f.get_tensor(key)
                 if ("block_sparse_moe.experts." in key or "mlp.experts." in key) and "weight_scale_inv" in key:
-                    keys_to_rename.append(key)
+                    keys_to_remove.append(key)
 
-        if keys_to_rename:
+        if keys_to_remove:
             found_any = True
             if args.dry_run:
-                print(f"\n{st_path.name}: would rename {len(keys_to_rename)} keys")
-                for k in keys_to_rename[:5]:
-                    print(f"  {k} -> {k.replace('weight_scale_inv', 'weight_scale')}")
-                if len(keys_to_rename) > 5:
-                    print(f"  ... and {len(keys_to_rename) - 5} more")
+                print(f"\n{st_path.name}: would remove {len(keys_to_remove)} weight_scale_inv keys")
+                for k in keys_to_remove[:5]:
+                    print(f"  (remove) {k}")
+                if len(keys_to_remove) > 5:
+                    print(f"  ... and {len(keys_to_remove) - 5} more")
             else:
-                for old_key in keys_to_rename:
-                    new_key = old_key.replace("weight_scale_inv", "weight_scale")
-                    tensors[new_key] = tensors.pop(old_key)
+                for k in keys_to_remove:
+                    del tensors[k]
                 save_file(tensors, st_path)
-                print(f"Renamed {len(keys_to_rename)} keys in {st_path.name}")
-                total_renamed += len(keys_to_rename)
+                print(f"Removed {len(keys_to_remove)} weight_scale_inv keys from {st_path.name}")
+                total_removed += len(keys_to_remove)
 
     if not found_any:
         # Diagnostic: show sample keys from first file
-        print("\nNo keys matched '(block_sparse_moe|mlp).experts.' and 'weight_scale_inv'.")
+        print("\nNo weight_scale_inv keys matched.")
         print("Sample keys from first file:")
         with safe_open(st_files[0], framework="pt", device="cpu") as f:
             keys = list(f.keys())
@@ -85,8 +85,8 @@ def main():
             print(f"  Scale-related (first 10): {scale_keys[:10]}")
     elif args.dry_run:
         print("\nDry run complete. Run without --dry-run to apply changes.")
-    elif total_renamed:
-        print(f"\nDone. Renamed {total_renamed} keys total.")
+    elif total_removed:
+        print(f"\nDone. Removed {total_removed} weight_scale_inv keys total.")
     return 0
 
 
