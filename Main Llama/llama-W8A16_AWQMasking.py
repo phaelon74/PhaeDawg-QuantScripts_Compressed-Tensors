@@ -1,4 +1,5 @@
 import argparse
+import json
 import yaml
 
 from datasets import load_dataset, concatenate_datasets
@@ -113,14 +114,13 @@ def format_sharegpt(example, columns, tokenizer):
     # Handle case where messages is a string (some datasets store JSON strings)
     if isinstance(messages, str):
         try:
-            import json
             messages = json.loads(messages)
         except:
             # Not JSON, treat as raw text
             formatted_messages.append({'role': 'user', 'content': messages})
             if formatted_messages:
                 text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
-                return {'text': text, 'messages': formatted_messages}
+                return {'text': text, 'messages': json.dumps(formatted_messages)}
             return {'text': '', 'messages': None}
     
     # Convert to standard format if needed
@@ -149,7 +149,7 @@ def format_sharegpt(example, columns, tokenizer):
     
     try:
         text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
-        return {'text': text, 'messages': formatted_messages}
+        return {'text': text, 'messages': json.dumps(formatted_messages)}
     except Exception as e:
         # If chat template fails, return empty
         return {'text': '', 'messages': None}
@@ -169,7 +169,7 @@ def format_prompt_answer(example, columns, tokenizer):
     ]
     
     text = tokenizer.apply_chat_template(messages, tokenize=False)
-    return {'text': text, 'messages': messages}
+    return {'text': text, 'messages': json.dumps(messages)}
 
 
 def format_chat_completion(example, columns, tokenizer):
@@ -182,7 +182,7 @@ def format_chat_completion(example, columns, tokenizer):
                 if isinstance(data[0], dict):
                     # Already in messages format
                     text = tokenizer.apply_chat_template(data, tokenize=False)
-                    return {'text': text, 'messages': data}
+                    return {'text': text, 'messages': json.dumps(data)}
                 elif isinstance(data[0], str):
                     # List of strings - alternate user/assistant
                     messages = []
@@ -190,7 +190,7 @@ def format_chat_completion(example, columns, tokenizer):
                         role = 'user' if i % 2 == 0 else 'assistant'
                         messages.append({'role': role, 'content': str(item)})
                     text = tokenizer.apply_chat_template(messages, tokenize=False)
-                    return {'text': text, 'messages': messages}
+                    return {'text': text, 'messages': json.dumps(messages)}
             elif isinstance(data, str):
                 # Single text field
                 return {'text': str(data), 'messages': None}
@@ -350,12 +350,13 @@ def tokenize_with_mask(batch):
     )
     if use_loss_mask:
         loss_masks = []
-        for i, messages in enumerate(batch["messages"]):
+        for i, messages_json in enumerate(batch["messages"]):
             input_ids = result["input_ids"][i]
             seq_len = len(input_ids)
-            if messages is None:
+            if messages_json is None or messages_json == "":
                 loss_masks.append([1] * seq_len)  # raw_text: all completion
             else:
+                messages = json.loads(messages_json)
                 mask = generate_assistant_mask(messages, tokenizer, MAX_SEQUENCE_LENGTH)
                 loss_masks.append(mask[:seq_len])
         result["loss_mask"] = loss_masks
