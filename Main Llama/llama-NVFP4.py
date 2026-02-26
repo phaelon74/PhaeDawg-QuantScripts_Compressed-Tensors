@@ -1,7 +1,7 @@
 """
-Llama NVFP4 Quantization Script
+NVFP4 Quantization Script
 
-Supports Llama 3, 3.1, 3.3, and other Llama-architecture models.
+Supports Llama, Mistral, and other decoder-based architectures.
 NVFP4: FP4 weights + FP4 activations, per-group-16 (fixed), optimized for Blackwell GPUs.
 """
 
@@ -14,6 +14,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import QuantizationModifier
+from llmcompressor.modifiers.utils import update_fused_layer_weight_global_scales
 
 # =========================
 # Parse Command-Line Arguments
@@ -96,11 +97,25 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 
 def detect_sequential_targets(model):
-    """Detect decoder layer type for Llama (3, 3.1, 3.3) - enables memory-efficient calibration."""
-    candidates = ["LlamaDecoderLayer", "LlamaModelDecoderLayer"]
+    """Detect decoder layer type for memory-efficient calibration."""
+    candidates = [
+        "LlamaDecoderLayer",
+        "MistralDecoderLayer",
+        "Qwen2DecoderLayer",
+        "Phi3DecoderLayer",
+        "GemmaDecoderLayer",
+        "Gemma2DecoderLayer",
+        "CohereDecoderLayer",
+        "Starcoder2DecoderLayer",
+    ]
     for name, module in model.named_modules():
         t = type(module).__name__
         if t in candidates:
+            return [t]
+    # Fallback: match any module whose name ends with "DecoderLayer"
+    for name, module in model.named_modules():
+        t = type(module).__name__
+        if t.endswith("DecoderLayer"):
             return [t]
     return None
 
@@ -319,17 +334,14 @@ print(f"Tokenized {NUM_CALIBRATION_SAMPLES} samples (max_seq_length={MAX_SEQUENC
 
 
 # =========================
-# NVFP4 recipe for Llama
+# NVFP4 recipe
 # =========================
 # NVFP4: FP4 weights + FP4 activations, per-group-16 (fixed), optimized for Blackwell.
-# Quantizes all Linear layers except lm_head and embeddings.
+# Quantizes all Linear layers except lm_head.
 recipe = QuantizationModifier(
     targets="Linear",
     scheme="NVFP4",
-    ignore=[
-        "lm_head",
-        "re:.*embed_tokens",  # Embedding layer (model.model.embed_tokens for Llama)
-    ],
+    ignore=["lm_head"],
 )
 
 # =========================
@@ -365,6 +377,9 @@ if sequential_targets:
     print(f"  - Sequential targets: {sequential_targets} (memory-efficient calibration)")
 
 oneshot(**oneshot_kwargs)
+
+# Unify global scales for fused QKV and gate/up layers (vLLM requirement)
+update_fused_layer_weight_global_scales(model)
 
 # =========================
 # Save compressed model
