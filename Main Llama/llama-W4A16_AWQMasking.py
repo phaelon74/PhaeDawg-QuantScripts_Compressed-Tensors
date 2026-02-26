@@ -121,7 +121,7 @@ def format_sharegpt(example, columns, tokenizer):
             if formatted_messages:
                 text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
                 return {'text': text, 'messages': json.dumps(formatted_messages)}
-            return {'text': '', 'messages': None}
+            return {'text': '', 'messages': ''}
     
     # Convert to standard format if needed
     if isinstance(messages, list):
@@ -145,14 +145,14 @@ def format_sharegpt(example, columns, tokenizer):
                 formatted_messages.append({'role': role, 'content': str(msg)})
     
     if not formatted_messages:
-        return {'text': '', 'messages': None}
+        return {'text': '', 'messages': ''}
     
     try:
         text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
         return {'text': text, 'messages': json.dumps(formatted_messages)}
     except Exception as e:
         # If chat template fails, return empty
-        return {'text': '', 'messages': None}
+        return {'text': '', 'messages': ''}
 
 
 def format_prompt_answer(example, columns, tokenizer):
@@ -193,11 +193,11 @@ def format_chat_completion(example, columns, tokenizer):
                     return {'text': text, 'messages': json.dumps(messages)}
             elif isinstance(data, str):
                 # Single text field
-                return {'text': str(data), 'messages': None}
+                return {'text': str(data), 'messages': ''}
     
     # Fallback: concatenate all columns
     text = ' '.join(str(example.get(col, '')) for col in columns)
-    return {'text': text, 'messages': None}
+    return {'text': text, 'messages': ''}
 
 
 def format_raw_text(example, columns, tokenizer):
@@ -206,7 +206,7 @@ def format_raw_text(example, columns, tokenizer):
     for col in columns:
         if col in example and example[col]:
             texts.append(str(example[col]))
-    return {'text': ' '.join(texts), 'messages': None}
+    return {'text': ' '.join(texts), 'messages': ''}
 
 
 FORMATTERS = {
