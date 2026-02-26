@@ -4,7 +4,7 @@ calibration_set:
       prompt: ""
       completion: ""
 
-  max_seq_length: 2048
+  max_seq_length: 4096
   shuffle: true
   seed: 42
 
