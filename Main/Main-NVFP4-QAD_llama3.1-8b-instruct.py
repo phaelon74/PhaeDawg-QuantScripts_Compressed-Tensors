@@ -112,8 +112,8 @@ class QuantizationArguments:
 class QADTrainingArguments:
     num_epochs: int = field(default=3, metadata={"help": "Training epochs (QAD paper default: 3)."})
     lr: float = field(default=1e-6, metadata={"help": "Learning rate (QAD paper: 1e-6 for SFT)."})
-    per_device_train_batch_size: int = field(default=4, metadata={"help": "Batch size."})
-    gradient_accumulation_steps: int = field(default=1, metadata={"help": "Gradient accumulation."})
+    per_device_train_batch_size: int = field(default=1, metadata={"help": "Batch size (use 1 for QAD to reduce OOM)."})
+    gradient_accumulation_steps: int = field(default=4, metadata={"help": "Gradient accumulation (effective batch = batch_size * accum)."})
 
 
 # =============================================================================
@@ -464,6 +464,8 @@ def main():
         do_eval=True,
         save_strategy="epoch",
         logging_steps=10,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": True},
     )
 
     last_checkpoint = None
