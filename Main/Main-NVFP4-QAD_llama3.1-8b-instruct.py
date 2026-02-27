@@ -464,7 +464,6 @@ def main():
         do_eval=True,
         save_strategy="epoch",
         logging_steps=10,
-        fsdp_config=fsdp_config if torch.cuda.device_count() > 1 else None,
     )
 
     last_checkpoint = None
