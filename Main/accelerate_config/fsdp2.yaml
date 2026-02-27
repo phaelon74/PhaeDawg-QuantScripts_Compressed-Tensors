@@ -16,7 +16,9 @@ distributed_type: FSDP
 downcast_bf16: 'no'
 fsdp_config:
   fsdp_version: 2
-  reshard_after_forward: true
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_transformer_layer_cls_to_wrap: LlamaDecoderLayer
+  fsdp_reshard_after_forward: true
   fsdp_cpu_ram_efficient_loading: false
   fsdp_offload_params: false
   fsdp_sync_module_states: true
