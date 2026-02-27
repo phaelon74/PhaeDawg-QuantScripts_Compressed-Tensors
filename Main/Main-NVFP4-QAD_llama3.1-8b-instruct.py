@@ -2,20 +2,25 @@
 NVFP4 QAD (Quantization-Aware Distillation) Script
 
 Performs NVFP4 quantization with QAD using NVIDIA Model-Optimizer's QADTrainer.
-Loads datasets from recipe YAML files and supports multi-GPU via accelerate/FSDP2.
+Loads datasets from recipe YAML files or NVIDIA's Daring-Anteater. Supports multi-GPU via accelerate/FSDP2.
 
 QAD is distillation (teacher BF16 -> student NVFP4), not full training.
 For best quality (near-BF16 accuracy), use QAD rather than PTQ.
 
-Usage:
-    accelerate launch --config_file Main/accelerate_config/fsdp2.yaml Main/Main-NVFP4-QAD.py \\
+Usage (recipe):
+    accelerate launch --config_file Main/accelerate_config/fsdp2.yaml Main/Main-NVFP4-QAD_llama3.1-8b-instruct.py \\
         --model_path /path/to/model \\
         --output_path /path/to/output \\
         --recipe_yaml Recipes/Datasets/StoryWriting_Default.yaml
 
+Usage (NVIDIA's recommended dataset, ~407M tokens):
+    accelerate launch --config_file Main/accelerate_config/fsdp2.yaml Main/Main-NVFP4-QAD_llama3.1-8b-instruct.py \\
+        --model_path /path/to/model \\
+        --output_path /path/to/output \\
+        --dataset Daring-Anteater
+
 Data volume note: QAD paper recommends ~0.5B-2.5B tokens for 24B models.
-StoryWriting_Default yields ~512 samples. At 4096 seq len that is ~2M tokens.
-For best results on large models, consider a larger recipe or repeating the dataset.
+Daring-Anteater provides ~99.5k samples (~407M tokens at 4096 seq len).
 """
 
 import gc
@@ -79,16 +84,25 @@ class ModelArguments:
 
 @dataclass
 class DataArguments:
-    recipe_yaml: str = field(
-        metadata={"help": "Path to dataset recipe YAML (e.g. Recipes/Datasets/StoryWriting_Default.yaml)."}
+    dataset: str = field(
+        default="recipe",
+        metadata={"help": "Data source: 'recipe' (use recipe_yaml) or 'Daring-Anteater' (NVIDIA's ~99.5k sample dataset)."},
+    )
+    recipe_yaml: str | None = field(
+        default=None,
+        metadata={"help": "Path to dataset recipe YAML (required when dataset='recipe')."},
     )
     train_size: int = field(
         default=0,
         metadata={"help": "Max train samples (0 = use all)."},
     )
     eval_size: int = field(
-        default=200,
+        default=512,
         metadata={"help": "Eval samples for calibration + validation."},
+    )
+    max_seq_length: int = field(
+        default=4096,
+        metadata={"help": "Max sequence length when using Daring-Anteater."},
     )
 
 
@@ -323,6 +337,54 @@ def make_recipe_data_module(
     }
 
 
+def make_daring_anteater_data_module(
+    tokenizer,
+    max_seq_length: int = 4096,
+    train_size: int = 0,
+    eval_size: int = 512,
+):
+    """
+    Load nvidia/Daring-Anteater (~99.5k samples, ~407M tokens) and produce
+    train/eval datasets with input_ids, attention_mask, labels (fixed-length, left-padded).
+    Uses format_sharegpt with columns=["system", "conversations"].
+    """
+    ds = load_dataset("nvidia/Daring-Anteater", split="train")
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    pad_token_id = tokenizer.pad_token_id
+
+    formatter_fn = lambda x: format_sharegpt(x, ["system", "conversations"], tokenizer)
+    ds = ds.map(formatter_fn, remove_columns=ds.column_names, num_proc=1)
+    ds = ds.filter(lambda x: len(x.get("text", "")) > 0)
+
+    def tokenize_fn(ex):
+        return _tokenize_and_pad(ex, tokenizer, max_seq_length, pad_token_id)
+
+    ds = ds.map(tokenize_fn, remove_columns=ds.column_names, num_proc=1)
+
+    total = len(ds)
+    seed = 42
+    eval_size = min(eval_size, total - 1) if total > 1 else 0
+    train_avail = total - eval_size
+    train_size = train_size if train_size > 0 else train_avail
+    train_size = min(train_size, train_avail)
+
+    if eval_size > 0:
+        ds = ds.train_test_split(test_size=eval_size, shuffle=True, seed=seed)
+        train_ds = ds["train"].select(range(min(train_size, len(ds["train"]))))
+        eval_ds = ds["test"]
+    else:
+        train_ds = ds.select(range(min(train_size, len(ds))))
+        eval_ds = ds.select(range(min(32, len(ds))))
+
+    return {
+        "train_dataset": train_ds,
+        "eval_dataset": eval_ds,
+        "data_collator": default_data_collator,
+    }
+
+
 # =============================================================================
 # Decoder Layer Detection & Memory Leak Fix
 # =============================================================================
@@ -378,20 +440,27 @@ def main():
     )
     model_args, data_args, quant_args, qad_args = parser.parse_args_into_dataclasses()
 
-    if not os.path.isfile(data_args.recipe_yaml):
-        raise FileNotFoundError(f"Recipe YAML not found: {data_args.recipe_yaml}")
-
-    with open(data_args.recipe_yaml, "r") as f:
-        recipe_config = yaml.safe_load(f)
-    calib = recipe_config.get("calibration_set", {})
-    if not calib:
-        raise ValueError(f"Recipe {data_args.recipe_yaml} must have 'calibration_set' section.")
-    max_seq_length = calib.get("max_seq_length", 4096)
-
-    print_rank_0(f"Model: {model_args.model_path}")
-    print_rank_0(f"Output: {model_args.output_path}")
-    print_rank_0(f"Recipe: {data_args.recipe_yaml}")
-    print_rank_0(f"max_seq_length: {max_seq_length}")
+    if data_args.dataset == "Daring-Anteater":
+        max_seq_length = data_args.max_seq_length
+        print_rank_0(f"Model: {model_args.model_path}")
+        print_rank_0(f"Output: {model_args.output_path}")
+        print_rank_0("Dataset: Daring-Anteater (nvidia/Daring-Anteater)")
+        print_rank_0(f"max_seq_length: {max_seq_length}")
+    else:
+        if not data_args.recipe_yaml:
+            raise ValueError("recipe_yaml is required when dataset='recipe'.")
+        if not os.path.isfile(data_args.recipe_yaml):
+            raise FileNotFoundError(f"Recipe YAML not found: {data_args.recipe_yaml}")
+        with open(data_args.recipe_yaml, "r") as f:
+            recipe_config = yaml.safe_load(f)
+        calib = recipe_config.get("calibration_set", {})
+        if not calib:
+            raise ValueError(f"Recipe {data_args.recipe_yaml} must have 'calibration_set' section.")
+        max_seq_length = calib.get("max_seq_length", 4096)
+        print_rank_0(f"Model: {model_args.model_path}")
+        print_rank_0(f"Output: {model_args.output_path}")
+        print_rank_0(f"Recipe: {data_args.recipe_yaml}")
+        print_rank_0(f"max_seq_length: {max_seq_length}")
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_path,
@@ -427,13 +496,30 @@ def main():
         "criterion": LMLogitsLoss(),
     }
 
-    data_module = make_recipe_data_module(
-        calib,
-        tokenizer,
-        max_seq_length,
-        train_size=data_args.train_size,
-        eval_size=data_args.eval_size,
-    )
+    if data_args.dataset == "Daring-Anteater":
+        data_module = make_daring_anteater_data_module(
+            tokenizer,
+            max_seq_length=max_seq_length,
+            train_size=data_args.train_size,
+            eval_size=data_args.eval_size,
+        )
+    else:
+        data_module = make_recipe_data_module(
+            calib,
+            tokenizer,
+            max_seq_length,
+            train_size=data_args.train_size,
+            eval_size=data_args.eval_size,
+        )
+
+    train_ds = data_module["train_dataset"]
+    total_train_tokens = len(train_ds) * max_seq_length
+    if total_train_tokens < 100_000_000:
+        n_m = total_train_tokens / 1_000_000
+        print_rank_0(
+            f"WARNING: Total training tokens (~{n_m:.1f}M) is below NVIDIA's recommended 500M-2.5B for best QAD quality. "
+            "Consider using --dataset Daring-Anteater or a larger recipe."
+        )
 
     eval_dataset_size = len(data_module["eval_dataset"])
     if quant_args.calib_size > eval_dataset_size:
