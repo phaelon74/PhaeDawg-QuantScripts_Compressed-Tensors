@@ -4,7 +4,13 @@ import yaml
 
 import torch.nn as nn
 from datasets import load_dataset, concatenate_datasets
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AutoModel
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoTokenizer,
+)
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier
@@ -81,10 +87,12 @@ config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
 model_type = getattr(config, "model_type", "")
 print(f"Model config type: {type(config).__name__}, model_type: {model_type}")
 
-# Qwen3.5 MoE uses Qwen3_5MoeForConditionalGeneration (multimodal) - requires AutoModel
+# Qwen3.5 MoE uses Qwen3_5MoeForConditionalGeneration (multimodal with lm_head)
+# Must use AutoModelForImageTextToText to preserve lm_head.weight
+# (tie_word_embeddings=False means lm_head is a separate parameter)
 if model_type == "qwen3_5_moe":
-    model = AutoModel.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-    print("Loaded Qwen3.5 MoE model (multimodal) with AutoModel")
+    model = AutoModelForImageTextToText.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
+    print("Loaded Qwen3.5 MoE model (multimodal) with AutoModelForImageTextToText")
 else:
     try:
         model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
