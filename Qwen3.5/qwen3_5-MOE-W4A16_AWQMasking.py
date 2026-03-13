@@ -20,7 +20,7 @@ from llmcompressor.utils import dispatch_for_generation
 # Parse Command-Line Arguments
 # =========================
 parser = argparse.ArgumentParser(
-    description="Run W4A16 AWQ quantization on dense Qwen3.5 model (e.g., Qwen3.5-27B)."
+    description="Run W4A16 AWQ quantization on Qwen3.5 MoE model (e.g., Qwen3.5-35B-A3B)."
 )
 parser.add_argument(
     "model_path",
@@ -87,12 +87,12 @@ config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
 model_type = getattr(config, "model_type", "")
 print(f"Model config type: {type(config).__name__}, model_type: {model_type}")
 
-# Qwen3.5 dense uses Qwen3_5ForConditionalGeneration (multimodal with lm_head)
+# Qwen3.5 MoE uses Qwen3_5MoeForConditionalGeneration (multimodal with lm_head)
 # Must use AutoModelForImageTextToText to preserve lm_head.weight
 # (tie_word_embeddings=False means lm_head is a separate parameter)
-if model_type in ("qwen3_5", "qwen3_5_moe"):
+if model_type == "qwen3_5_moe":
     model = AutoModelForImageTextToText.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-    print(f"Loaded Qwen3.5 model (multimodal, model_type={model_type}) with AutoModelForImageTextToText")
+    print("Loaded Qwen3.5 MoE model (multimodal) with AutoModelForImageTextToText")
 else:
     try:
         model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
@@ -105,8 +105,17 @@ else:
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 # =========================
-# Dynamic ignore list for Vision (Qwen3.5 dense architecture)
+# Dynamic ignore list for MoE + Vision (Qwen3.5 architecture)
 # =========================
+router_keywords = (
+    "router",
+    "expert_choice",
+    "dispatch",
+    "scores",
+    "route",
+    "topk",
+    "switch",
+)
 vision_keywords = (
     "vision",
     "visual",
@@ -127,8 +136,17 @@ vision_keywords = (
 def _should_ignore_module(module_name: str) -> bool:
     """Determine if a Linear module should be excluded from quantization."""
     name = module_name.lower()
+    # Keep FFN projections quantized (gate_proj, up_proj, down_proj in experts)
+    if any(x in name for x in ("gate_proj", "up_proj", "down_proj")):
+        return False
+    # Ignore routing-related linears
+    if any(k in name for k in router_keywords):
+        return True
     # Ignore VL vision + projector components (quantize text transformer only)
     if any(k in name for k in vision_keywords):
+        return True
+    # Ignore MoE router gate and shared expert gate (vLLM does not support gate quantization)
+    if name.endswith("mlp.gate") or "mlp.shared_expert_gate" in name or name.endswith("shared_expert_gate"):
         return True
     # Do not quantize final output head
     if name.endswith("lm_head") or name == "lm_head":
@@ -470,7 +488,7 @@ oneshot_kwargs = dict(
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
     tokenizer=tokenizer,
     use_loss_mask=use_loss_mask,
-    calibrate_moe_context=False,
+    calibrate_moe_context=True,
 )
 if use_loss_mask:
     oneshot_kwargs["pipeline"] = "sequential"  # Required for AWQ masking
