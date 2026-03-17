@@ -1,26 +1,26 @@
-import argparse
-import json
-import yaml
+"""
+NVFP4 Quantization Script
 
-import torch.nn as nn
+Supports Llama, Mistral, and other decoder-based architectures.
+NVFP4: FP4 weights + FP4 activations, per-group-16 (fixed), optimized for Blackwell GPUs.
+"""
+
+import argparse
+import yaml
+import torch
+
 from datasets import load_dataset, concatenate_datasets
-from transformers import (
-    AutoConfig,
-    AutoModel,
-    AutoModelForCausalLM,
-    AutoModelForImageTextToText,
-    AutoTokenizer,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
 from llmcompressor import oneshot
-from llmcompressor.modifiers.awq import AWQModifier
-from llmcompressor.utils import dispatch_for_generation
+from llmcompressor.modifiers.quantization import QuantizationModifier
+from llmcompressor.modifiers.utils import update_fused_layer_weight_global_scales
 
 # =========================
 # Parse Command-Line Arguments
 # =========================
 parser = argparse.ArgumentParser(
-    description="Run W4A16 AWQ quantization on dense Qwen3.5 model (e.g., Qwen3.5-27B)."
+    description="Run NVFP4 quantization on Llama model (3, 3.1, 3.3, etc.)."
 )
 parser.add_argument(
     "model_path",
@@ -37,24 +37,11 @@ parser.add_argument(
     type=str,
     help="Path to the dataset recipe YAML file (contains max_seq_length and dataset config)."
 )
-parser.add_argument(
-    "group_size",
-    type=int,
-    help="Group size for W4A16 quantization (e.g., 32, 64, 128)."
-)
-parser.add_argument(
-    "--use-loss-mask",
-    action="store_true",
-    default=False,
-    help="Enable AWQ loss masking (only completion tokens contribute to calibration)."
-)
 
 args = parser.parse_args()
 model_path = args.model_path
 output_path = args.output_path
 recipe_yaml_path = args.recipe_yaml
-group_size = args.group_size
-use_loss_mask = args.use_loss_mask
 
 # =========================
 # Load Recipe YAML and extract config
@@ -67,14 +54,13 @@ calibration_config = recipe_config.get('calibration_set', {})
 MAX_SEQUENCE_LENGTH = calibration_config['max_seq_length']  # Required - fail if missing
 SHUFFLE = calibration_config.get('shuffle', True)
 SEED = calibration_config.get('seed', 42)
+num_calibration_samples = calibration_config.get('num_samples', None)  # Optional cap
 datasets_config = calibration_config.get('datasets', [])
 
 print(f"Loaded recipe from: {recipe_yaml_path}")
 print(f"  - max_seq_length: {MAX_SEQUENCE_LENGTH}")
 print(f"  - shuffle: {SHUFFLE}")
 print(f"  - seed: {SEED}")
-print(f"  - group_size: {group_size}")
-print(f"  - use_loss_mask: {use_loss_mask}")
 print(f"  - datasets to load: {len(datasets_config)}")
 
 # =========================
@@ -84,70 +70,55 @@ MODEL_ID = model_path
 
 # Load config to check model type
 config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
-model_type = getattr(config, "model_type", "")
-print(f"Model config type: {type(config).__name__}, model_type: {model_type}")
+print(f"Model config type: {type(config).__name__}")
 
-# Qwen3.5 dense uses Qwen3_5ForConditionalGeneration (multimodal with lm_head)
-# Must use AutoModelForImageTextToText to preserve lm_head.weight
-# (tie_word_embeddings=False means lm_head is a separate parameter)
-if model_type in ("qwen3_5", "qwen3_5_moe"):
-    model = AutoModelForImageTextToText.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-    print(f"Loaded Qwen3.5 model (multimodal, model_type={model_type}) with AutoModelForImageTextToText")
-else:
-    try:
-        model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-    except ValueError as e:
-        print(f"AutoModelForCausalLM failed (likely custom model): {e}")
-        print("Attempting AutoModel with trust_remote_code=True...")
-        model = AutoModel.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-        print("Successfully loaded model with AutoModel")
+# Load in BF16 - NVFP4 calibration prefers BF16/FP16
+# device_map=None enables sequential processing for large models
+try:
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+        device_map=None,
+    )
+except ValueError as e:
+    print(f"AutoModelForCausalLM failed (likely custom model): {e}")
+    print("Attempting AutoModel with trust_remote_code=True...")
+    from transformers import AutoModel
+    model = AutoModel.from_pretrained(
+        MODEL_ID,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+        device_map=None,
+    )
+    print("Successfully loaded model with AutoModel")
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
-# =========================
-# Dynamic ignore list for Vision (Qwen3.5 dense architecture)
-# =========================
-vision_keywords = (
-    "vision",
-    "visual",
-    "vision_tower",
-    "image",
-    "pixel",
-    "clip",
-    "vit",
-    "resampler",
-    "mm_projector",
-    "multimodal_projector",
-    "projector",
-    "logit_scale",
-    "merger",
-)
 
+def detect_sequential_targets(model):
+    """Detect decoder layer type for memory-efficient calibration."""
+    candidates = [
+        "LlamaDecoderLayer",
+        "MistralDecoderLayer",
+        "Qwen2DecoderLayer",
+        "Phi3DecoderLayer",
+        "GemmaDecoderLayer",
+        "Gemma2DecoderLayer",
+        "CohereDecoderLayer",
+        "Starcoder2DecoderLayer",
+    ]
+    for name, module in model.named_modules():
+        t = type(module).__name__
+        if t in candidates:
+            return [t]
+    # Fallback: match any module whose name ends with "DecoderLayer"
+    for name, module in model.named_modules():
+        t = type(module).__name__
+        if t.endswith("DecoderLayer"):
+            return [t]
+    return None
 
-def _should_ignore_module(module_name: str) -> bool:
-    """Determine if a Linear module should be excluded from quantization."""
-    name = module_name.lower()
-    # Ignore VL vision + projector components (quantize text transformer only)
-    if any(k in name for k in vision_keywords):
-        return True
-    # Do not quantize final output head
-    if name.endswith("lm_head") or name == "lm_head":
-        return True
-    return False
-
-
-# Build ignore list dynamically based on module names in the loaded model
-ignore_list = []
-linear_count = 0
-for mod_name, mod in model.named_modules():
-    if isinstance(mod, nn.Linear):
-        linear_count += 1
-        if _should_ignore_module(mod_name):
-            ignore_list.append(mod_name)
-ignore_list = sorted(set(ignore_list + ["lm_head"]))
-print(f"Linear modules: {linear_count}, ignored: {len(ignore_list)}")
-for m in ignore_list:
-    print(f"  - {m}")
 
 # =========================
 # Dataset Formatters
@@ -171,14 +142,15 @@ def format_sharegpt(example, columns, tokenizer):
     # Handle case where messages is a string (some datasets store JSON strings)
     if isinstance(messages, str):
         try:
+            import json
             messages = json.loads(messages)
-        except:
+        except Exception:
             # Not JSON, treat as raw text
             formatted_messages.append({'role': 'user', 'content': messages})
             if formatted_messages:
                 text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
-                return {'text': text, 'messages': json.dumps(formatted_messages)}
-            return {'text': '', 'messages': ''}
+                return {'text': text}
+            return {'text': ''}
     
     # Convert to standard format if needed
     if isinstance(messages, list):
@@ -202,14 +174,14 @@ def format_sharegpt(example, columns, tokenizer):
                 formatted_messages.append({'role': role, 'content': str(msg)})
     
     if not formatted_messages:
-        return {'text': '', 'messages': ''}
+        return {'text': ''}
     
     try:
         text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
-        return {'text': text, 'messages': json.dumps(formatted_messages)}
-    except Exception as e:
+        return {'text': text}
+    except Exception:
         # If chat template fails, return empty
-        return {'text': '', 'messages': ''}
+        return {'text': ''}
 
 
 def format_prompt_answer(example, columns, tokenizer):
@@ -226,7 +198,7 @@ def format_prompt_answer(example, columns, tokenizer):
     ]
     
     text = tokenizer.apply_chat_template(messages, tokenize=False)
-    return {'text': text, 'messages': json.dumps(messages)}
+    return {'text': text}
 
 
 def format_chat_completion(example, columns, tokenizer):
@@ -239,7 +211,7 @@ def format_chat_completion(example, columns, tokenizer):
                 if isinstance(data[0], dict):
                     # Already in messages format
                     text = tokenizer.apply_chat_template(data, tokenize=False)
-                    return {'text': text, 'messages': json.dumps(data)}
+                    return {'text': text}
                 elif isinstance(data[0], str):
                     # List of strings - alternate user/assistant
                     messages = []
@@ -247,14 +219,14 @@ def format_chat_completion(example, columns, tokenizer):
                         role = 'user' if i % 2 == 0 else 'assistant'
                         messages.append({'role': role, 'content': str(item)})
                     text = tokenizer.apply_chat_template(messages, tokenize=False)
-                    return {'text': text, 'messages': json.dumps(messages)}
+                    return {'text': text}
             elif isinstance(data, str):
                 # Single text field
-                return {'text': str(data), 'messages': ''}
+                return {'text': str(data)}
     
     # Fallback: concatenate all columns
     text = ' '.join(str(example.get(col, '')) for col in columns)
-    return {'text': text, 'messages': ''}
+    return {'text': text}
 
 
 def format_raw_text(example, columns, tokenizer):
@@ -263,7 +235,7 @@ def format_raw_text(example, columns, tokenizer):
     for col in columns:
         if col in example and example[col]:
             texts.append(str(example[col]))
-    return {'text': ' '.join(texts), 'messages': ''}
+    return {'text': ' '.join(texts)}
 
 
 FORMATTERS = {
@@ -272,57 +244,6 @@ FORMATTERS = {
     'chat_completion': format_chat_completion,
     'raw_text': format_raw_text,
 }
-
-
-def generate_assistant_mask(messages, tokenizer, max_seq_length):
-    """
-    Generate loss_mask: 1 for assistant/completion tokens, 0 for prompt tokens.
-    Tries apply_chat_template(return_assistant_tokens_mask=True) first;
-    falls back to heuristic (prompt-only tokenization) if unsupported.
-    """
-    try:
-        result = tokenizer.apply_chat_template(
-            messages,
-            return_assistant_tokens_mask=True,
-            return_dict=True,
-            add_special_tokens=False,
-            max_length=max_seq_length,
-            truncation=True,
-        )
-        mask = result.get("assistant_tokens_mask")
-        if mask is not None:
-            return mask[:max_seq_length]
-    except (TypeError, ValueError, KeyError):
-        pass
-
-    # Fallback: tokenize prompt-only to find boundary
-    try:
-        # Build prompt: all messages except last assistant content
-        if not messages:
-            return []
-        last_role = messages[-1].get("role", "user")
-        if last_role != "assistant":
-            return [0] * max_seq_length  # No completion tokens
-
-        prompt_messages = messages[:-1] + [{"role": "assistant", "content": ""}]
-        prompt_ids = tokenizer.apply_chat_template(
-            prompt_messages,
-            tokenize=True,
-            add_generation_prompt=False,
-            add_special_tokens=False,
-        )
-        full_ids = tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_special_tokens=False,
-            max_length=max_seq_length,
-            truncation=True,
-        )
-        prompt_len = min(len(prompt_ids), len(full_ids), max_seq_length)
-        seq_len = min(len(full_ids), max_seq_length)
-        return [0] * prompt_len + [1] * (seq_len - prompt_len)
-    except Exception:
-        return [1] * max_seq_length  # Fallback: treat all as completion
 
 
 # =========================
@@ -395,96 +316,70 @@ if SHUFFLE:
 # Tokenize in batches
 # =========================
 print("\n=== Tokenizing dataset ===")
-
-
-def tokenize_with_mask(batch):
-    result = tokenizer(
+ds = ds.map(
+    lambda batch: tokenizer(
         batch["text"],
         padding=False,
         max_length=MAX_SEQUENCE_LENGTH,
         truncation=True,
         add_special_tokens=False,
-    )
-    if use_loss_mask:
-        loss_masks = []
-        for i, messages_json in enumerate(batch["messages"]):
-            input_ids = result["input_ids"][i]
-            seq_len = len(input_ids)
-            if messages_json is None or messages_json == "":
-                loss_masks.append([1] * seq_len)  # raw_text: all completion
-            else:
-                messages = json.loads(messages_json)
-                mask = generate_assistant_mask(messages, tokenizer, MAX_SEQUENCE_LENGTH)
-                loss_masks.append(mask[:seq_len])
-        result["loss_mask"] = loss_masks
-    return result
-
-
-ds = ds.map(
-    tokenize_with_mask,
+    ),
     batched=True,
     remove_columns=ds.column_names,
-    num_proc=1 if use_loss_mask else 4,  # Single proc when using messages for mask
+    num_proc=4,
 )
 
-NUM_CALIBRATION_SAMPLES = len(ds)
-print(f"Tokenized {NUM_CALIBRATION_SAMPLES} samples (max_seq_length={MAX_SEQUENCE_LENGTH}, use_loss_mask={use_loss_mask})")
+NUM_CALIBRATION_SAMPLES = min(len(ds), num_calibration_samples) if num_calibration_samples else len(ds)
+print(f"Tokenized {NUM_CALIBRATION_SAMPLES} samples (max_seq_length={MAX_SEQUENCE_LENGTH})")
 
 
 # =========================
-# Quantization recipe  (W4A16-SYM, Marlin-friendly)
+# NVFP4 recipe
 # =========================
-from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
-
-weight_args = QuantizationArgs(
-    num_bits=4,          # 4-bit weights
-    type="int",
-    symmetric=True,      # SYMMETRIC (Marlin requirement)
-    strategy="group",    # group-wise quantization
-    group_size=group_size,  # Dynamic group size from argument
+# NVFP4: FP4 weights + FP4 activations, per-group-16 (fixed), optimized for Blackwell.
+# Quantizes all Linear layers except lm_head.
+recipe = QuantizationModifier(
+    targets="Linear",
+    scheme="NVFP4",
+    ignore=["lm_head"],
 )
-
-quant_scheme = QuantizationScheme(
-    targets=["Linear"],
-    weights=weight_args,
-    input_activations=None,   # A16 (leave activations in FP16/BF16)
-    output_activations=None,
-)
-
-recipe = [
-    AWQModifier(
-        ignore=ignore_list,
-        config_groups={"group_0": quant_scheme},
-    ),
-]
 
 # =========================
 # Run one-shot compression
 # =========================
 print("\n=== Running one-shot compression ===")
-oneshot_kwargs = dict(
-    model=model,
-    dataset=ds,
-    recipe=recipe,
-    max_seq_length=MAX_SEQUENCE_LENGTH,
-    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
-    tokenizer=tokenizer,
-    use_loss_mask=use_loss_mask,
-    calibrate_moe_context=False,
-)
-if use_loss_mask:
-    oneshot_kwargs["pipeline"] = "sequential"  # Required for AWQ masking
+print(f"  - Scheme: NVFP4 (FP4 weights + FP4 activations, per-group-16)")
+print(f"  - Calibration samples: {NUM_CALIBRATION_SAMPLES}")
+
+oneshot_kwargs = {
+    "model": model,
+    "dataset": ds,
+    "recipe": recipe,
+    "max_seq_length": MAX_SEQUENCE_LENGTH,
+    "num_calibration_samples": NUM_CALIBRATION_SAMPLES,
+    "tokenizer": tokenizer,
+    "tracing_ignore": [
+        "_update_causal_mask",
+        "create_causal_mask",
+        "create_sliding_window_causal_mask",
+        "make_causal_mask",
+        "get_causal_mask",
+        "mask_interface",
+        "mask_function",
+        "_prepare_4d_causal_attention_mask",
+        "_prepare_4d_causal_attention_mask_with_cache_position",
+    ],
+}
+
+sequential_targets = detect_sequential_targets(model)
+if sequential_targets:
+    oneshot_kwargs["sequential_targets"] = sequential_targets
+    print(f"  - Sequential targets: {sequential_targets} (memory-efficient calibration)")
+
 oneshot(**oneshot_kwargs)
 
-# =========================
-# Quick sanity generation
-# =========================
-#print("\n\n========== SAMPLE GENERATION ==============")
-#dispatch_for_generation(model)
-#input_ids = tokenizer("Hello my name is", return_tensors="pt").input_ids.to("cuda")
-#output = model.generate(input_ids, max_new_tokens=100)
-#print(tokenizer.decode(output[0]))
-#print("==========================================\n\n")
+# Unify global scales for fused QKV and gate/up layers (vLLM requirement)
+update_fused_layer_weight_global_scales(model)
 
 # =========================
 # Save compressed model
@@ -495,3 +390,4 @@ tokenizer.save_pretrained(SAVE_DIR)
 
 print("\n=== Complete ===")
 print("Saved to:", SAVE_DIR)
+print("NVFP4 quantization ready for inference on Blackwell GPUs (SM 9.0+).")

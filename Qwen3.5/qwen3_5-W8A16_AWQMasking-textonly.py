@@ -6,21 +6,40 @@ import torch.nn as nn
 from datasets import load_dataset, concatenate_datasets
 from transformers import (
     AutoConfig,
-    AutoModel,
     AutoModelForCausalLM,
-    AutoModelForImageTextToText,
     AutoTokenizer,
 )
 
+# Transformers v5 compatibility: TORCH_INIT_FUNCTIONS was removed in v5
+# llm-compressor still imports it; inject if missing (see vllm-project/llm-compressor#2328)
+import transformers.modeling_utils as _tmu
+if not hasattr(_tmu, "TORCH_INIT_FUNCTIONS"):
+    _tmu.TORCH_INIT_FUNCTIONS = {
+        "uniform_": nn.init.uniform_,
+        "normal_": nn.init.normal_,
+        "trunc_normal_": nn.init.trunc_normal_,
+        "constant_": nn.init.constant_,
+        "xavier_uniform_": nn.init.xavier_uniform_,
+        "xavier_normal_": nn.init.xavier_normal_,
+        "kaiming_uniform_": nn.init.kaiming_uniform_,
+        "kaiming_normal_": nn.init.kaiming_normal_,
+        "uniform": nn.init.uniform,
+        "normal": nn.init.normal,
+        "xavier_uniform": nn.init.xavier_uniform,
+        "xavier_normal": nn.init.xavier_normal,
+        "kaiming_uniform": nn.init.kaiming_uniform,
+        "kaiming_normal": nn.init.kaiming_normal,
+    }
+
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier
-from llmcompressor.utils import dispatch_for_generation
+from llmcompressor.modifiers.awq.mappings import AWQMapping
 
 # =========================
 # Parse Command-Line Arguments
 # =========================
 parser = argparse.ArgumentParser(
-    description="Run W4A16 AWQ quantization on dense Qwen3.5 model (e.g., Qwen3.5-27B)."
+    description="Run W8A16 AWQ quantization on text-only Qwen3.5 finetunes (model_type=qwen3_5_text)."
 )
 parser.add_argument(
     "model_path",
@@ -40,7 +59,7 @@ parser.add_argument(
 parser.add_argument(
     "group_size",
     type=int,
-    help="Group size for W4A16 quantization (e.g., 32, 64, 128)."
+    help="Group size for W8A16 quantization (e.g., 32, 64, 128)."
 )
 parser.add_argument(
     "--use-loss-mask",
@@ -82,69 +101,55 @@ print(f"  - datasets to load: {len(datasets_config)}")
 # =========================
 MODEL_ID = model_path
 
-# Load config to check model type
+# Text-only Qwen3.5 finetunes use model_type="qwen3_5_text" and load via AutoModelForCausalLM
 config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
 model_type = getattr(config, "model_type", "")
 print(f"Model config type: {type(config).__name__}, model_type: {model_type}")
 
-# Qwen3.5 dense uses Qwen3_5ForConditionalGeneration (multimodal with lm_head)
-# Must use AutoModelForImageTextToText to preserve lm_head.weight
-# (tie_word_embeddings=False means lm_head is a separate parameter)
-if model_type in ("qwen3_5", "qwen3_5_moe"):
-    model = AutoModelForImageTextToText.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-    print(f"Loaded Qwen3.5 model (multimodal, model_type={model_type}) with AutoModelForImageTextToText")
-else:
-    try:
-        model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-    except ValueError as e:
-        print(f"AutoModelForCausalLM failed (likely custom model): {e}")
-        print("Attempting AutoModel with trust_remote_code=True...")
-        model = AutoModel.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-        print("Successfully loaded model with AutoModel")
+if model_type not in ("qwen3_5_text",):
+    print(f"WARNING: Expected model_type='qwen3_5_text' for text-only finetune, got '{model_type}'")
+    print("If this is a full VLM (model_type='qwen3_5'), use qwen3_5-W4A16_AWQMasking.py instead.")
+
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
+print(f"Loaded text-only Qwen3.5 model (model_type={model_type}) with AutoModelForCausalLM")
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
 # =========================
-# Dynamic ignore list for Vision (Qwen3.5 dense architecture)
+# Ignore list — follows QuantTrio/Qwen3.5-27B-AWQ pattern adapted for W8A16
+# Keep sensitive attention projections and small linear_attn internals in BF16.
 # =========================
-vision_keywords = (
-    "vision",
-    "visual",
-    "vision_tower",
-    "image",
-    "pixel",
-    "clip",
-    "vit",
-    "resampler",
-    "mm_projector",
-    "multimodal_projector",
-    "projector",
-    "logit_scale",
-    "merger",
-)
+ignore_list = ["lm_head"]
 
-
-def _should_ignore_module(module_name: str) -> bool:
-    """Determine if a Linear module should be excluded from quantization."""
-    name = module_name.lower()
-    # Ignore VL vision + projector components (quantize text transformer only)
-    if any(k in name for k in vision_keywords):
-        return True
-    # Do not quantize final output head
-    if name.endswith("lm_head") or name == "lm_head":
-        return True
-    return False
-
-
-# Build ignore list dynamically based on module names in the loaded model
-ignore_list = []
-linear_count = 0
 for mod_name, mod in model.named_modules():
-    if isinstance(mod, nn.Linear):
-        linear_count += 1
-        if _should_ignore_module(mod_name):
-            ignore_list.append(mod_name)
-ignore_list = sorted(set(ignore_list + ["lm_head"]))
+    if not isinstance(mod, nn.Linear):
+        continue
+
+    # First layer — keep entirely in BF16 (embedding-adjacent, very sensitive)
+    if mod_name.startswith("model.layers.0."):
+        ignore_list.append(mod_name)
+        continue
+
+    # Self-attention Q/K/V — keep in BF16 (high sensitivity to quantization)
+    if ".self_attn.q_proj" in mod_name or ".self_attn.k_proj" in mod_name or ".self_attn.v_proj" in mod_name:
+        ignore_list.append(mod_name)
+        continue
+
+    # GatedDeltaNet internals that are small or non-quantizable
+    if ".linear_attn.in_proj_b" in mod_name or ".linear_attn.in_proj_a" in mod_name:
+        ignore_list.append(mod_name)
+        continue
+    if ".linear_attn.conv1d" in mod_name or ".linear_attn.norm" in mod_name:
+        ignore_list.append(mod_name)
+        continue
+
+    # Catch any remaining layers whose dimensions are incompatible with group_size
+    if mod.out_features % group_size != 0:
+        ignore_list.append(mod_name)
+
+ignore_list = sorted(set(ignore_list))
+
+linear_count = sum(1 for _, mod in model.named_modules() if isinstance(mod, nn.Linear))
 print(f"Linear modules: {linear_count}, ignored: {len(ignore_list)}")
 for m in ignore_list:
     print(f"  - {m}")
@@ -432,12 +437,12 @@ print(f"Tokenized {NUM_CALIBRATION_SAMPLES} samples (max_seq_length={MAX_SEQUENC
 
 
 # =========================
-# Quantization recipe  (W4A16-SYM, Marlin-friendly)
+# Quantization recipe  (W8A16-SYM, Marlin-friendly)
 # =========================
 from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
 
 weight_args = QuantizationArgs(
-    num_bits=4,          # 4-bit weights
+    num_bits=8,          # 8-bit weights
     type="int",
     symmetric=True,      # SYMMETRIC (Marlin requirement)
     strategy="group",    # group-wise quantization
@@ -451,10 +456,76 @@ quant_scheme = QuantizationScheme(
     output_activations=None,
 )
 
+# Qwen3.5 uses hybrid attention (like Qwen3Next): some layers have standard
+# self_attn, others have linear_attn (Gated DeltaNet) with different projections.
+# AWQ mappings must ONLY reference layers that are actually being quantized.
+# Self-attn Q/K/V and linear_attn in_proj_b/a are on the ignore list,
+# so they must NOT appear as balance_layers (the smooth would corrupt them).
+num_layers = config.num_hidden_layers
+ignore_set = set(ignore_list)
+print(f"Building AWQ mappings for {num_layers} layers")
+
+awq_mappings = []
+self_attn_count = 0
+linear_attn_count = 0
+skipped_first_layer = False
+
+for i in range(num_layers):
+    prefix = f"model.layers.{i}"
+    layer = model.model.layers[i]
+
+    # Skip AWQ mappings entirely for ignored layers (e.g. layer 0)
+    if all(f"{prefix}.{suffix}" in ignore_set
+           for suffix in ["mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]):
+        skipped_first_layer = True
+        continue
+
+    if hasattr(layer, 'self_attn'):
+        self_attn_count += 1
+        # Q/K/V are all on the ignore list and o_proj input dim (num_heads*head_dim)
+        # doesn't match input_layernorm dim (hidden_size), so no valid AWQ mapping
+        # exists for self_attn. Skip — MLP mappings below still apply.
+    elif hasattr(layer, 'linear_attn'):
+        linear_attn_count += 1
+        # Only include the large projections that are actually quantized
+        # (in_proj_b and in_proj_a are on the ignore list)
+        balance = []
+        for proj in ["in_proj_qkv", "in_proj_z"]:
+            name = f"{prefix}.linear_attn.{proj}"
+            if name not in ignore_set:
+                balance.append(name)
+        if balance:
+            awq_mappings.append(
+                AWQMapping(
+                    smooth_layer=f"{prefix}.input_layernorm",
+                    balance_layers=balance,
+                ),
+            )
+
+    # MLP mappings are the same regardless of attention type
+    awq_mappings.extend([
+        AWQMapping(
+            smooth_layer=f"{prefix}.post_attention_layernorm",
+            balance_layers=[
+                f"{prefix}.mlp.gate_proj",
+                f"{prefix}.mlp.up_proj",
+            ],
+        ),
+        AWQMapping(
+            smooth_layer=f"{prefix}.mlp.up_proj",
+            balance_layers=[f"{prefix}.mlp.down_proj"],
+        ),
+    ])
+
+print(f"  self_attn layers: {self_attn_count}, linear_attn layers: {linear_attn_count}")
+if skipped_first_layer:
+    print(f"  (layer 0 skipped — entirely on ignore list)")
+
 recipe = [
     AWQModifier(
         ignore=ignore_list,
         config_groups={"group_0": quant_scheme},
+        mappings=awq_mappings,
     ),
 ]
 
@@ -470,7 +541,9 @@ oneshot_kwargs = dict(
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
     tokenizer=tokenizer,
     use_loss_mask=use_loss_mask,
-    calibrate_moe_context=False,
+    # Explicit sequential targets to bypass _get_no_split_modules() which
+    # was removed in transformers 5.x (replaced by _no_split_modules attribute)
+    sequential_targets=["Qwen3_5DecoderLayer"],
 )
 if use_loss_mask:
     oneshot_kwargs["pipeline"] = "sequential"  # Required for AWQ masking
@@ -479,8 +552,9 @@ oneshot(**oneshot_kwargs)
 # =========================
 # Quick sanity generation
 # =========================
+#from compressed_tensors.offload import dispatch_model
 #print("\n\n========== SAMPLE GENERATION ==============")
-#dispatch_for_generation(model)
+#dispatch_model(model)
 #input_ids = tokenizer("Hello my name is", return_tensors="pt").input_ids.to("cuda")
 #output = model.generate(input_ids, max_new_tokens=100)
 #print(tokenizer.decode(output[0]))
