@@ -1,15 +1,12 @@
 import argparse
 import json
-import re
 import yaml
 
 import torch.nn as nn
 from datasets import load_dataset, concatenate_datasets
 from transformers import (
     AutoConfig,
-    AutoModel,
     AutoModelForCausalLM,
-    AutoModelForImageTextToText,
     AutoTokenizer,
 )
 
@@ -104,25 +101,15 @@ print(f"  - datasets to load: {len(datasets_config)}")
 # =========================
 MODEL_ID = model_path
 
-# Load config to check model type
+# Load with AutoModelForCausalLM — matching the working NVFP4A16 reference.
+# AutoModelForImageTextToText wraps the LM under .language_model, which saves
+# weights with VLM paths that vLLM doesn't recognize -> garbage output.
 config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
 model_type = getattr(config, "model_type", "")
 print(f"Model config type: {type(config).__name__}, model_type: {model_type}")
 
-# Qwen3.5 dense uses Qwen3_5ForConditionalGeneration (multimodal with lm_head)
-# Must use AutoModelForImageTextToText to preserve lm_head.weight
-# (tie_word_embeddings=False means lm_head is a separate parameter)
-if model_type in ("qwen3_5", "qwen3_5_moe"):
-    model = AutoModelForImageTextToText.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-    print(f"Loaded Qwen3.5 model (multimodal, model_type={model_type}) with AutoModelForImageTextToText")
-else:
-    try:
-        model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-    except ValueError as e:
-        print(f"AutoModelForCausalLM failed (likely custom model): {e}")
-        print("Attempting AutoModel with trust_remote_code=True...")
-        model = AutoModel.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
-        print("Successfully loaded model with AutoModel")
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
+print(f"Loaded model with AutoModelForCausalLM (matching NVFP4A16 reference)")
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
@@ -481,76 +468,72 @@ quant_scheme = QuantizationScheme(
 # =========================
 # Build explicit per-layer AWQ mappings
 # =========================
-# Derive layer prefix from actual module names — wrong prefix causes garbage output
+# Qwen3.5 VLM is not in AWQ's known architectures, so default regex mappings
+# fail (they match ALL layers at once instead of one-per-mapping).
+# Hybrid attention (self_attn vs linear_attn) also means not all layers have
+# q_proj/k_proj/v_proj. We must build per-layer mappings explicitly.
+
+import re as _re
 ignore_set = set(ignore_list)
 
+# Derive layer prefix from actual module names
 _layer_prefix = None
 for mod_name, mod in model.named_modules():
     if isinstance(mod, nn.Linear) and "mlp.gate_proj" in mod_name and "layers." in mod_name:
         _layer_prefix = mod_name.rsplit(".mlp.gate_proj", 1)[0]
         break
 if _layer_prefix is None:
-    raise AttributeError("Could not find mlp.gate_proj in model — cannot derive layer prefix")
+    raise AttributeError("Could not find mlp.gate_proj — cannot derive layer prefix")
+_m = _re.match(r"^(.+\.layers)\.\d+$", _layer_prefix)
+layer_prefix = _m.group(1) if _m else _layer_prefix.rsplit(".", 1)[0]
 
-_prefix_match = re.match(r"^(.+\.layers)\.\d+$", _layer_prefix)
-layer_prefix = _prefix_match.group(1) if _prefix_match else _layer_prefix.rsplit(".", 1)[0]
-
-# Get text_model (layers container) and num_layers
 if hasattr(model.model, "language_model") and hasattr(model.model.language_model, "layers"):
     text_model = model.model.language_model
 elif hasattr(model.model, "layers"):
     text_model = model.model
 else:
-    raise AttributeError("Could not find model.model.layers or model.model.language_model.layers")
+    raise AttributeError("Could not locate layers container in model")
 num_layers = len(text_model.layers)
 
-print(f"Derived layer prefix from model: {layer_prefix}.{{i}} (from {_layer_prefix})")
-
-print(f"Building AWQ mappings for {num_layers} layers")
+print(f"Layer prefix: {layer_prefix} ({num_layers} layers)")
 
 awq_mappings = []
-self_attn_count = 0
-linear_attn_count = 0
-skipped_first_layer = False
-
 for i in range(num_layers):
-    prefix = f"{layer_prefix}.{i}"
+    pfx = f"{layer_prefix}.{i}"
     layer = text_model.layers[i]
 
-    # Skip AWQ mappings entirely for ignored layers (e.g. layer 0)
-    if all(f"{prefix}.{suffix}" in ignore_set
-           for suffix in ["mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]):
-        skipped_first_layer = True
-        continue
-
+    # Self-attention layers: input_layernorm -> q/k/v_proj, v_proj -> o_proj
     if hasattr(layer, 'self_attn'):
-        self_attn_count += 1
-        # Q/K/V are all on the ignore list and o_proj input dim (num_heads*head_dim)
-        # doesn't match input_layernorm dim (hidden_size), so no valid AWQ mapping
-        # exists for self_attn. Skip — MLP mappings below still apply.
-    elif hasattr(layer, 'linear_attn'):
-        linear_attn_count += 1
-        # linear_attn (Gated DeltaNet) is fully ignored — no AWQ mappings.
-        # Quantizing it produces garbage; reference skips it entirely.
+        qkv = [f"{pfx}.self_attn.{p}" for p in ("q_proj", "k_proj", "v_proj")
+               if f"{pfx}.self_attn.{p}" not in ignore_set]
+        if qkv:
+            awq_mappings.append(AWQMapping(
+                smooth_layer=f"{pfx}.input_layernorm",
+                balance_layers=qkv,
+            ))
+        if f"{pfx}.self_attn.o_proj" not in ignore_set and f"{pfx}.self_attn.v_proj" not in ignore_set:
+            awq_mappings.append(AWQMapping(
+                smooth_layer=f"{pfx}.self_attn.v_proj",
+                balance_layers=[f"{pfx}.self_attn.o_proj"],
+            ))
 
-    # MLP mappings are the same regardless of attention type
-    awq_mappings.extend([
-        AWQMapping(
-            smooth_layer=f"{prefix}.post_attention_layernorm",
-            balance_layers=[
-                f"{prefix}.mlp.gate_proj",
-                f"{prefix}.mlp.up_proj",
-            ],
-        ),
-        AWQMapping(
-            smooth_layer=f"{prefix}.mlp.up_proj",
-            balance_layers=[f"{prefix}.mlp.down_proj"],
-        ),
-    ])
+    # linear_attn layers: all ignored, no attention AWQ mappings
 
-print(f"  self_attn layers: {self_attn_count}, linear_attn layers: {linear_attn_count}")
-if skipped_first_layer:
-    print(f"  (layer 0 skipped — entirely on ignore list)")
+    # MLP mappings (all layers have MLP)
+    gate_up = [f"{pfx}.mlp.{p}" for p in ("gate_proj", "up_proj")
+               if f"{pfx}.mlp.{p}" not in ignore_set]
+    if gate_up:
+        awq_mappings.append(AWQMapping(
+            smooth_layer=f"{pfx}.post_attention_layernorm",
+            balance_layers=gate_up,
+        ))
+    if f"{pfx}.mlp.down_proj" not in ignore_set and f"{pfx}.mlp.up_proj" not in ignore_set:
+        awq_mappings.append(AWQMapping(
+            smooth_layer=f"{pfx}.mlp.up_proj",
+            balance_layers=[f"{pfx}.mlp.down_proj"],
+        ))
+
+print(f"Built {len(awq_mappings)} AWQ mappings")
 
 recipe = [
     AWQModifier(
@@ -581,14 +564,15 @@ if use_loss_mask:
 oneshot(**oneshot_kwargs)
 
 # =========================
-# Quick sanity generation
+# Quick sanity generation (verify quantization before saving)
 # =========================
-#print("\n\n========== SAMPLE GENERATION ==============")
-#dispatch_for_generation(model)
-#input_ids = tokenizer("Hello my name is", return_tensors="pt").input_ids.to("cuda")
-#output = model.generate(input_ids, max_new_tokens=100)
-#print(tokenizer.decode(output[0]))
-#print("==========================================\n\n")
+print("\n\n========== SAMPLE GENERATION ==============")
+from compressed_tensors.offload import dispatch_model
+dispatch_model(model)
+input_ids = tokenizer("Hello my name is", return_tensors="pt").input_ids.to(model.device)
+output = model.generate(input_ids, max_new_tokens=100)
+print(tokenizer.decode(output[0], skip_special_tokens=True))
+print("==========================================\n\n")
 
 # =========================
 # Save compressed model
