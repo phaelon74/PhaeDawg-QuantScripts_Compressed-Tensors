@@ -16,6 +16,7 @@ Gemma 4 W4A16 AWQ (Activation-Aware Weight Quantization)
 
   W4 weights use asymmetric int4 (symmetric=False) for better scale/zero-point fit.
   Optional --use-loss-mask: AWQ optimizes only assistant tokens (requires pipeline=sequential).
+  loss_mask is padded to len(input_ids) so sequential AWQ hooks get a full [batch, seq] mask.
 
   Requires: pip install -U transformers llmcompressor compressed-tensors accelerate datasets pyyaml
   Note: Gemma 4 requires transformers >= 4.52 (or install from source).
@@ -52,6 +53,22 @@ if not hasattr(_tmu, "TORCH_INIT_FUNCTIONS"):
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier, AWQMapping
+
+# Populated after tokenizer load; passed into assistant-mask chat_template calls (Gemma 4 IT).
+_ASSISTANT_MASK_CHAT_KW: dict = {}
+
+
+def _init_assistant_mask_chat_kw(tok) -> None:
+    global _ASSISTANT_MASK_CHAT_KW
+    try:
+        tok.apply_chat_template(
+            [{"role": "user", "content": "x"}],
+            tokenize=False,
+            enable_thinking=False,
+        )
+        _ASSISTANT_MASK_CHAT_KW = {"enable_thinking": False}
+    except TypeError:
+        _ASSISTANT_MASK_CHAT_KW = {}
 
 
 def build_gemma4_awq_mappings(model) -> list:
@@ -159,6 +176,7 @@ if not getattr(tokenizer, "chat_template", None):
     _tmpl = getattr(_pt, "chat_template", None) if _pt is not None else None
     if _tmpl is not None:
         tokenizer.chat_template = _tmpl
+_init_assistant_mask_chat_kw(tokenizer)
 print(f"Loaded model: {MODEL_ID}")
 
 gemma4_awq_mappings = build_gemma4_awq_mappings(model)
@@ -211,6 +229,8 @@ def generate_assistant_mask(messages, tokenizer, max_seq_length):
     """
     loss_mask: 1 for assistant tokens, 0 for prompt. Used when --use-loss-mask.
     Tries apply_chat_template(return_assistant_tokens_mask=True); else heuristic.
+    Returned list may be shorter than a later tokenizer(text=...) pass; callers
+    must align length to len(input_ids) (see tokenize_with_mask).
     """
     try:
         result = tokenizer.apply_chat_template(
@@ -220,16 +240,17 @@ def generate_assistant_mask(messages, tokenizer, max_seq_length):
             add_special_tokens=False,
             max_length=max_seq_length,
             truncation=True,
+            **_ASSISTANT_MASK_CHAT_KW,
         )
         mask = result.get("assistant_tokens_mask")
         if mask is not None:
-            return mask[:max_seq_length]
+            return list(mask)[:max_seq_length]
     except (TypeError, ValueError, KeyError):
         pass
 
     try:
         if not messages:
-            return []
+            return [0] * max_seq_length
         last_role = messages[-1].get("role", "user")
         if last_role != "assistant":
             return [0] * max_seq_length
@@ -240,6 +261,7 @@ def generate_assistant_mask(messages, tokenizer, max_seq_length):
             tokenize=True,
             add_generation_prompt=False,
             add_special_tokens=False,
+            **_ASSISTANT_MASK_CHAT_KW,
         )
         full_ids = tokenizer.apply_chat_template(
             messages,
@@ -247,12 +269,21 @@ def generate_assistant_mask(messages, tokenizer, max_seq_length):
             add_special_tokens=False,
             max_length=max_seq_length,
             truncation=True,
+            **_ASSISTANT_MASK_CHAT_KW,
         )
         prompt_len = min(len(prompt_ids), len(full_ids), max_seq_length)
         seq_len = min(len(full_ids), max_seq_length)
         return [0] * prompt_len + [1] * (seq_len - prompt_len)
     except Exception:
         return [1] * max_seq_length
+
+
+def _align_loss_mask_to_seq(mask, seq_len, pad=0):
+    """Must equal len(input_ids) or sequential AWQ collator leaves mismatched [B,T] vs activations."""
+    m = list(mask)[:seq_len]
+    if len(m) < seq_len:
+        m.extend([pad] * (seq_len - len(m)))
+    return m
 
 
 def format_sharegpt(example, columns, tokenizer, use_loss_mask=False):
@@ -455,7 +486,7 @@ def tokenize_with_mask(batch):
             else:
                 msgs = json.loads(messages_json)
                 mask = generate_assistant_mask(msgs, tokenizer, MAX_SEQUENCE_LENGTH)
-                loss_masks.append(mask[:seq_len])
+                loss_masks.append(_align_loss_mask_to_seq(mask, seq_len, pad=0))
         result["loss_mask"] = loss_masks
     return result
 
