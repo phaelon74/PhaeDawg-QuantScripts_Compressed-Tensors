@@ -110,20 +110,26 @@ print("\n\n========== SAMPLE GENERATION ==============")
 dispatch_model(model)
 
 SAMPLE_PROMPT = "Hello my name is"
+messages = [{"role": "user", "content": SAMPLE_PROMPT}]
 
 _tok = getattr(processor, "tokenizer", processor)
-if getattr(_tok, "chat_template", None):
-    messages = [{"role": "user", "content": SAMPLE_PROMPT}]
-    prompt_text = _tok.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    inputs = processor(text=[prompt_text], return_tensors="pt")
-else:
-    inputs = processor(text=[SAMPLE_PROMPT], return_tensors="pt")
+has_chat_tmpl = getattr(_tok, "chat_template", None) is not None
 
-input_ids = inputs.input_ids.to(model.device)
-input_len = input_ids.shape[-1]
-output = model.generate(input_ids, max_new_tokens=100)
+if has_chat_tmpl:
+    prompt_text = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+else:
+    prompt_text = SAMPLE_PROMPT
+
+inputs = processor(text=[prompt_text], return_tensors="pt")
+inputs = {k: v.to(model.device) for k, v in inputs.items() if hasattr(v, "to")}
+input_len = inputs["input_ids"].shape[-1]
+
+output = model.generate(**inputs, max_new_tokens=100)
 print(processor.decode(output[0][input_len:], skip_special_tokens=True))
 print("==========================================\n\n")
 

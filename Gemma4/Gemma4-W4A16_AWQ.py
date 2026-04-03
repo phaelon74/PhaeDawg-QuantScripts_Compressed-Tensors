@@ -6,8 +6,9 @@ Gemma 4 W4A16 AWQ (Activation-Aware Weight Quantization)
   - Calibration from a YAML recipe (Recipes/Datasets/*.yaml), same schema as Qwen AWQ scripts
   - Gemma4ForConditionalGeneration + AutoProcessor save for vLLM multimodal paths
 
-  Gemma 4 31B: hybrid local/global attention; global layers omit v_proj (shared KV).
-  AWQ skips mappings when a target module is missing.
+  Gemma 4 31B: hybrid local/global attention. Attention AWQ mappings are omitted:
+  q/k/v_proj are followed by q_norm/k_norm/v_norm, which erase AWQ scaling; MLP uses
+  pre_feedforward_layernorm (not post_attention_layernorm) as the smooth layer.
 
   Example:
     python Gemma4-W4A16_AWQ.py /path/to/gemma-4-31B/ /path/to/out/ \\
@@ -52,44 +53,25 @@ from llmcompressor.modifiers.awq import AWQModifier, AWQMapping
 
 def build_gemma4_awq_mappings(model) -> list:
     """
-    One AWQMapping per (layer, logical edge). llm-compressor rejects regex that
-    matches multiple smooth layers (e.g. all input_layernorms at once).
-    Global-attn blocks may omit v_proj; skip v_proj smooth/balance entries then.
+    Two AWQMappings per decoder layer (MLP only). Attention mappings are omitted:
+    Gemma4 applies q_norm/k_norm/v_norm immediately after q/k/v_proj, which
+    re-normalizes activations and makes input_layernorm->q/k/v (and v_proj->o_proj)
+    AWQ harmful rather than helpful (see llm-compressor issues on QK-norm models).
 
-    Gemma4ForConditionalGeneration: inner backbone is model.model (Gemma4Model);
-    decoder stack is model.model.language_model. Module *names* for AWQ are still
-    model.language_model.layers.* (relative to the root conditional-gen module).
+    MLP: pre_feedforward_layernorm feeds gate_proj/up_proj (post_attention_layernorm
+    sits before the residual add and does not feed the MLP).
+
+    Module names are model.language_model.layers.* relative to the root
+    Gemma4ForConditionalGeneration (same as named_modules() under that root).
     """
     layers = model.model.language_model.layers
     mappings = []
     for i in range(len(layers)):
         p = f"model.language_model.layers.{i}"
-        attn = layers[i].self_attn
-        has_v_proj = getattr(attn, "v_proj", None) is not None
-
-        pre_attn = [
-            f"{p}.self_attn.q_proj",
-            f"{p}.self_attn.k_proj",
-        ]
-        if has_v_proj:
-            pre_attn.append(f"{p}.self_attn.v_proj")
-        mappings.append(
-            AWQMapping(
-                smooth_layer=f"{p}.input_layernorm",
-                balance_layers=pre_attn,
-            )
-        )
-        if has_v_proj:
-            mappings.append(
-                AWQMapping(
-                    smooth_layer=f"{p}.self_attn.v_proj",
-                    balance_layers=[f"{p}.self_attn.o_proj"],
-                )
-            )
         mappings.extend(
             [
                 AWQMapping(
-                    smooth_layer=f"{p}.post_attention_layernorm",
+                    smooth_layer=f"{p}.pre_feedforward_layernorm",
                     balance_layers=[
                         f"{p}.mlp.gate_proj",
                         f"{p}.mlp.up_proj",
@@ -169,10 +151,10 @@ if not getattr(tokenizer, "chat_template", None):
 print(f"Loaded model: {MODEL_ID}")
 
 gemma4_awq_mappings = build_gemma4_awq_mappings(model)
+_n_layers = len(model.model.language_model.layers)
 print(
     f"AWQ mappings: {len(gemma4_awq_mappings)} "
-    f"({len(model.model.language_model.layers)} decoder layers; "
-    "3 or 4 attention mappings per layer depending on v_proj)"
+    f"({_n_layers} decoder layers x 2 MLP mappings; no attention mappings — QK/V-norm)"
 )
 
 # =========================
@@ -400,6 +382,7 @@ recipe = [
         ignore=[
             "lm_head",
             "re:.*vision_tower.*",
+            "re:.*multi_modal_projector.*",
             "re:.*embed_vision.*",
         ],
         config_groups={
@@ -435,20 +418,26 @@ print("\n\n========== SAMPLE GENERATION ==============")
 dispatch_model(model)
 
 SAMPLE_PROMPT = "Hello my name is"
+messages = [{"role": "user", "content": SAMPLE_PROMPT}]
 
 _tok = getattr(processor, "tokenizer", processor)
-if getattr(_tok, "chat_template", None):
-    messages = [{"role": "user", "content": SAMPLE_PROMPT}]
-    prompt_text = _tok.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    inputs = processor(text=[prompt_text], return_tensors="pt")
-else:
-    inputs = processor(text=[SAMPLE_PROMPT], return_tensors="pt")
+has_chat_tmpl = getattr(_tok, "chat_template", None) is not None
 
-input_ids = inputs.input_ids.to(model.device)
-input_len = input_ids.shape[-1]
-output = model.generate(input_ids, max_new_tokens=100)
+if has_chat_tmpl:
+    prompt_text = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+else:
+    prompt_text = SAMPLE_PROMPT
+
+inputs = processor(text=[prompt_text], return_tensors="pt")
+inputs = {k: v.to(model.device) for k, v in inputs.items() if hasattr(v, "to")}
+input_len = inputs["input_ids"].shape[-1]
+
+output = model.generate(**inputs, max_new_tokens=100)
 print(processor.decode(output[0][input_len:], skip_special_tokens=True))
 print("==========================================\n\n")
 
