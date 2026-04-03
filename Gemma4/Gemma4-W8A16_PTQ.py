@@ -92,6 +92,7 @@ recipe = QuantizationModifier(
         "lm_head",
         "re:.*vision_tower.*",
         "re:.*multi_modal_projector.*",
+        "re:.*embed_vision.*",
     ],
 )
 
