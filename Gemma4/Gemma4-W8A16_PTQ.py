@@ -96,17 +96,12 @@ recipe = QuantizationModifier(
 )
 
 # =========================
-# Apply quantization (no calibration data needed for W8A16 PTQ)
-# =========================
-print("\n=== Running W8A16 PTQ ===")
-oneshot(model=model, recipe=recipe)
-
-# =========================
 # Quick sanity generation (text-only)
 # =========================
 print("\n\n========== SAMPLE GENERATION ==============")
 dispatch_model(model)
-input_ids = processor("Hello my name is", return_tensors="pt").input_ids.to(model.device)
+inputs = processor(text=["Hello my name is"], return_tensors="pt")
+input_ids = inputs.input_ids.to(model.device)
 output = model.generate(input_ids, max_new_tokens=100)
 print(processor.decode(output[0], skip_special_tokens=True))
 print("==========================================\n\n")
