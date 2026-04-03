@@ -108,10 +108,23 @@ oneshot(model=model, recipe=recipe)
 # =========================
 print("\n\n========== SAMPLE GENERATION ==============")
 dispatch_model(model)
-inputs = processor(text=["Hello my name is"], return_tensors="pt")
+
+SAMPLE_PROMPT = "Hello my name is"
+
+_tok = getattr(processor, "tokenizer", processor)
+if getattr(_tok, "chat_template", None):
+    messages = [{"role": "user", "content": SAMPLE_PROMPT}]
+    prompt_text = _tok.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    inputs = processor(text=[prompt_text], return_tensors="pt")
+else:
+    inputs = processor(text=[SAMPLE_PROMPT], return_tensors="pt")
+
 input_ids = inputs.input_ids.to(model.device)
+input_len = input_ids.shape[-1]
 output = model.generate(input_ids, max_new_tokens=100)
-print(processor.decode(output[0], skip_special_tokens=True))
+print(processor.decode(output[0][input_len:], skip_special_tokens=True))
 print("==========================================\n\n")
 
 # =========================
