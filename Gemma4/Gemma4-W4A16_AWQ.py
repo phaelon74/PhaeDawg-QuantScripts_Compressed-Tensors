@@ -160,6 +160,12 @@ model = Gemma4ForConditionalGeneration.from_pretrained(
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+# Some Gemma checkpoints ship without tokenizer.chat_template; processor may still have it.
+if not getattr(tokenizer, "chat_template", None):
+    _pt = getattr(processor, "tokenizer", None)
+    _tmpl = getattr(_pt, "chat_template", None) if _pt is not None else None
+    if _tmpl is not None:
+        tokenizer.chat_template = _tmpl
 print(f"Loaded model: {MODEL_ID}")
 
 gemma4_awq_mappings = build_gemma4_awq_mappings(model)
@@ -172,6 +178,42 @@ print(
 # =========================
 # Dataset formatters (recipe: formatter + columns)
 # =========================
+def messages_to_calibration_text(tokenizer, messages) -> str:
+    """Use chat template when present; otherwise plain multi-turn text (AWQ-safe)."""
+    if not messages:
+        return ""
+
+    norm = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", m.get("from", "user"))
+        if role in ("human", "Human", "user"):
+            role = "user"
+        elif role in ("gpt", "assistant", "Assistant", "bot"):
+            role = "assistant"
+        elif role == "system":
+            role = "system"
+        content = m.get("content", m.get("value", m.get("text", "")))
+        content = str(content).strip() if content is not None else ""
+        if content:
+            norm.append({"role": role, "content": content})
+
+    if not norm:
+        return ""
+
+    if getattr(tokenizer, "chat_template", None):
+        try:
+            return tokenizer.apply_chat_template(
+                norm,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+        except (ValueError, TypeError, RuntimeError):
+            pass
+    return "\n\n".join(f"{m['role']}: {m['content']}" for m in norm)
+
+
 def format_sharegpt(example, columns, tokenizer):
     formatted_messages = []
     if len(columns) >= 2 and "system" in columns[0].lower():
@@ -191,10 +233,11 @@ def format_sharegpt(example, columns, tokenizer):
         except json.JSONDecodeError:
             formatted_messages.append({"role": "user", "content": messages})
             if formatted_messages:
-                text = tokenizer.apply_chat_template(
-                    formatted_messages, tokenize=False
-                )
-                return {"text": text}
+                return {
+                    "text": messages_to_calibration_text(
+                        tokenizer, formatted_messages
+                    )
+                }
             return {"text": ""}
 
     if isinstance(messages, list):
@@ -219,11 +262,7 @@ def format_sharegpt(example, columns, tokenizer):
 
     if not formatted_messages:
         return {"text": ""}
-    try:
-        text = tokenizer.apply_chat_template(formatted_messages, tokenize=False)
-        return {"text": text}
-    except Exception:
-        return {"text": ""}
+    return {"text": messages_to_calibration_text(tokenizer, formatted_messages)}
 
 
 def format_prompt_answer(example, columns, tokenizer):
@@ -235,8 +274,7 @@ def format_prompt_answer(example, columns, tokenizer):
         {"role": "user", "content": str(prompt)},
         {"role": "assistant", "content": str(answer)},
     ]
-    text = tokenizer.apply_chat_template(messages, tokenize=False)
-    return {"text": text}
+    return {"text": messages_to_calibration_text(tokenizer, messages)}
 
 
 def format_chat_completion(example, columns, tokenizer):
@@ -246,14 +284,12 @@ def format_chat_completion(example, columns, tokenizer):
         data = example[col]
         if isinstance(data, list) and len(data) > 0:
             if isinstance(data[0], dict):
-                text = tokenizer.apply_chat_template(data, tokenize=False)
-                return {"text": text}
+                return {"text": messages_to_calibration_text(tokenizer, data)}
             messages = []
             for i, item in enumerate(data):
                 role = "user" if i % 2 == 0 else "assistant"
                 messages.append({"role": role, "content": str(item)})
-            text = tokenizer.apply_chat_template(messages, tokenize=False)
-            return {"text": text}
+            return {"text": messages_to_calibration_text(tokenizer, messages)}
         if isinstance(data, str):
             return {"text": str(data)}
     text = " ".join(str(example.get(col, "")) for col in columns)
