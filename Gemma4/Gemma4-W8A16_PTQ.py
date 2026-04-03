@@ -95,6 +95,13 @@ recipe = QuantizationModifier(
     ],
 )
 
+
+# =========================
+# Apply quantization (no calibration data needed for W8A16 PTQ)
+# =========================
+print("\n=== Running W8A16 PTQ ===")
+oneshot(model=model, recipe=recipe)
+
 # =========================
 # Quick sanity generation (text-only)
 # =========================
