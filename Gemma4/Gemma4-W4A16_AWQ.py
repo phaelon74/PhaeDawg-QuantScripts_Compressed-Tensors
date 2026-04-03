@@ -14,6 +14,9 @@ Gemma 4 W4A16 AWQ (Activation-Aware Weight Quantization)
     python Gemma4-W4A16_AWQ.py /path/to/gemma-4-31B/ /path/to/out/ \\
       ../Recipes/Datasets/General_reasoning.yaml --group-size 32
 
+  W4 weights use asymmetric int4 (symmetric=False) for better scale/zero-point fit.
+  Optional --use-loss-mask: AWQ optimizes only assistant tokens (requires pipeline=sequential).
+
   Requires: pip install -U transformers llmcompressor compressed-tensors accelerate datasets pyyaml
   Note: Gemma 4 requires transformers >= 4.52 (or install from source).
 """
@@ -112,9 +115,16 @@ parser.add_argument(
     default=None,
     help="Override calibration_set.max_seq_length from the recipe when set.",
 )
+parser.add_argument(
+    "--use-loss-mask",
+    action="store_true",
+    default=False,
+    help="AWQ loss on assistant tokens only; enables sequential pipeline (match Llama/Qwen AWQ scripts).",
+)
 args = parser.parse_args()
 
 MODEL_ID = args.model_path
+use_loss_mask = args.use_loss_mask
 
 # =========================
 # Recipe YAML (calibration_set)
@@ -132,6 +142,7 @@ datasets_config = calibration_config.get("datasets", [])
 
 print(f"Loaded recipe: {args.recipe_yaml}")
 print(f"  max_seq_length: {MAX_SEQUENCE_LENGTH}  shuffle: {SHUFFLE}  seed: {SEED}")
+print(f"  use_loss_mask: {use_loss_mask}")
 print(f"  dataset entries in recipe: {len(datasets_config)}")
 
 # =========================
@@ -196,7 +207,55 @@ def messages_to_calibration_text(tokenizer, messages) -> str:
     return "\n\n".join(f"{m['role']}: {m['content']}" for m in norm)
 
 
-def format_sharegpt(example, columns, tokenizer):
+def generate_assistant_mask(messages, tokenizer, max_seq_length):
+    """
+    loss_mask: 1 for assistant tokens, 0 for prompt. Used when --use-loss-mask.
+    Tries apply_chat_template(return_assistant_tokens_mask=True); else heuristic.
+    """
+    try:
+        result = tokenizer.apply_chat_template(
+            messages,
+            return_assistant_tokens_mask=True,
+            return_dict=True,
+            add_special_tokens=False,
+            max_length=max_seq_length,
+            truncation=True,
+        )
+        mask = result.get("assistant_tokens_mask")
+        if mask is not None:
+            return mask[:max_seq_length]
+    except (TypeError, ValueError, KeyError):
+        pass
+
+    try:
+        if not messages:
+            return []
+        last_role = messages[-1].get("role", "user")
+        if last_role != "assistant":
+            return [0] * max_seq_length
+
+        prompt_messages = messages[:-1] + [{"role": "assistant", "content": ""}]
+        prompt_ids = tokenizer.apply_chat_template(
+            prompt_messages,
+            tokenize=True,
+            add_generation_prompt=False,
+            add_special_tokens=False,
+        )
+        full_ids = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_special_tokens=False,
+            max_length=max_seq_length,
+            truncation=True,
+        )
+        prompt_len = min(len(prompt_ids), len(full_ids), max_seq_length)
+        seq_len = min(len(full_ids), max_seq_length)
+        return [0] * prompt_len + [1] * (seq_len - prompt_len)
+    except Exception:
+        return [1] * max_seq_length
+
+
+def format_sharegpt(example, columns, tokenizer, use_loss_mask=False):
     formatted_messages = []
     if len(columns) >= 2 and "system" in columns[0].lower():
         system_prompt = example.get(columns[0], "")
@@ -215,12 +274,13 @@ def format_sharegpt(example, columns, tokenizer):
         except json.JSONDecodeError:
             formatted_messages.append({"role": "user", "content": messages})
             if formatted_messages:
-                return {
-                    "text": messages_to_calibration_text(
-                        tokenizer, formatted_messages
-                    )
-                }
-            return {"text": ""}
+                text = messages_to_calibration_text(
+                    tokenizer, formatted_messages
+                )
+                if use_loss_mask:
+                    return {"text": text, "messages": json.dumps(formatted_messages)}
+                return {"text": text}
+            return {"text": "", "messages": ""} if use_loss_mask else {"text": ""}
 
     if isinstance(messages, list):
         for msg in messages:
@@ -243,11 +303,14 @@ def format_sharegpt(example, columns, tokenizer):
                 formatted_messages.append({"role": role, "content": str(msg)})
 
     if not formatted_messages:
-        return {"text": ""}
-    return {"text": messages_to_calibration_text(tokenizer, formatted_messages)}
+        return {"text": "", "messages": ""} if use_loss_mask else {"text": ""}
+    text = messages_to_calibration_text(tokenizer, formatted_messages)
+    if use_loss_mask:
+        return {"text": text, "messages": json.dumps(formatted_messages)}
+    return {"text": text}
 
 
-def format_prompt_answer(example, columns, tokenizer):
+def format_prompt_answer(example, columns, tokenizer, use_loss_mask=False):
     prompt_col = columns[0]
     answer_col = columns[1] if len(columns) > 1 else columns[0]
     prompt = example.get(prompt_col, "")
@@ -256,34 +319,50 @@ def format_prompt_answer(example, columns, tokenizer):
         {"role": "user", "content": str(prompt)},
         {"role": "assistant", "content": str(answer)},
     ]
-    return {"text": messages_to_calibration_text(tokenizer, messages)}
+    text = messages_to_calibration_text(tokenizer, messages)
+    if use_loss_mask:
+        return {"text": text, "messages": json.dumps(messages)}
+    return {"text": text}
 
 
-def format_chat_completion(example, columns, tokenizer):
+def format_chat_completion(example, columns, tokenizer, use_loss_mask=False):
     for col in columns:
         if col not in example:
             continue
         data = example[col]
         if isinstance(data, list) and len(data) > 0:
             if isinstance(data[0], dict):
-                return {"text": messages_to_calibration_text(tokenizer, data)}
+                text = messages_to_calibration_text(tokenizer, data)
+                if use_loss_mask:
+                    return {"text": text, "messages": json.dumps(data)}
+                return {"text": text}
             messages = []
             for i, item in enumerate(data):
                 role = "user" if i % 2 == 0 else "assistant"
                 messages.append({"role": role, "content": str(item)})
-            return {"text": messages_to_calibration_text(tokenizer, messages)}
+            text = messages_to_calibration_text(tokenizer, messages)
+            if use_loss_mask:
+                return {"text": text, "messages": json.dumps(messages)}
+            return {"text": text}
         if isinstance(data, str):
+            if use_loss_mask:
+                return {"text": str(data), "messages": ""}
             return {"text": str(data)}
     text = " ".join(str(example.get(col, "")) for col in columns)
+    if use_loss_mask:
+        return {"text": text, "messages": ""}
     return {"text": text}
 
 
-def format_raw_text(example, columns, _tokenizer):
+def format_raw_text(example, columns, _tokenizer, use_loss_mask=False):
     texts = []
     for col in columns:
         if col in example and example[col]:
             texts.append(str(example[col]))
-    return {"text": " ".join(texts)}
+    text = " ".join(texts)
+    if use_loss_mask:
+        return {"text": text, "messages": ""}
+    return {"text": text}
 
 
 FORMATTERS = {
@@ -332,8 +411,9 @@ for ds_config in datasets_config:
             part = part.shuffle(seed=SEED).select(range(n))
 
         formatter_fn = FORMATTERS.get(formatter_name, format_raw_text)
+        _cols, _tok, _ulm, _fn = columns, tokenizer, use_loss_mask, formatter_fn
         part = part.map(
-            lambda x: formatter_fn(x, columns, tokenizer),
+            lambda x, c=_cols, t=_tok, u=_ulm, f=_fn: f(x, c, t, u),
             remove_columns=part.column_names,
             num_proc=1,
         )
@@ -351,24 +431,40 @@ ds = concatenate_datasets(all_parts)
 if SHUFFLE:
     ds = ds.shuffle(seed=SEED)
 
-print(f"\n=== Tokenizing {len(ds)} samples (max_length={MAX_SEQUENCE_LENGTH}) ===")
+print(
+    f"\n=== Tokenizing {len(ds)} samples "
+    f"(max_length={MAX_SEQUENCE_LENGTH}, use_loss_mask={use_loss_mask}) ==="
+)
 
 
-def tokenize_batch(batch):
-    return tokenizer(
+def tokenize_with_mask(batch):
+    result = tokenizer(
         batch["text"],
         padding=False,
         max_length=MAX_SEQUENCE_LENGTH,
         truncation=True,
         add_special_tokens=False,
     )
+    if use_loss_mask:
+        loss_masks = []
+        for i, messages_json in enumerate(batch["messages"]):
+            input_ids = result["input_ids"][i]
+            seq_len = len(input_ids)
+            if messages_json is None or messages_json == "":
+                loss_masks.append([1] * seq_len)
+            else:
+                msgs = json.loads(messages_json)
+                mask = generate_assistant_mask(msgs, tokenizer, MAX_SEQUENCE_LENGTH)
+                loss_masks.append(mask[:seq_len])
+        result["loss_mask"] = loss_masks
+    return result
 
 
 ds = ds.map(
-    tokenize_batch,
+    tokenize_with_mask,
     batched=True,
     remove_columns=ds.column_names,
-    num_proc=4,
+    num_proc=1 if use_loss_mask else 4,
 )
 
 NUM_CALIBRATION_SAMPLES = len(ds)
@@ -391,7 +487,7 @@ recipe = [
                 "weights": {
                     "num_bits": 4,
                     "type": "int",
-                    "symmetric": True,
+                    "symmetric": False,
                     "strategy": "group",
                     "group_size": args.group_size,
                 },
@@ -401,15 +497,22 @@ recipe = [
     ),
 ]
 
-print(f"\n=== Running W4A16 AWQ (group_size={args.group_size}) ===")
-oneshot(
+print(
+    f"\n=== Running W4A16 AWQ (group_size={args.group_size}, "
+    f"symmetric=False, use_loss_mask={use_loss_mask}) ==="
+)
+oneshot_kwargs = dict(
     model=model,
     dataset=ds,
     recipe=recipe,
     max_seq_length=MAX_SEQUENCE_LENGTH,
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
     tokenizer=tokenizer,
+    use_loss_mask=use_loss_mask,
 )
+if use_loss_mask:
+    oneshot_kwargs["pipeline"] = "sequential"
+oneshot(**oneshot_kwargs)
 
 # =========================
 # Quick sanity generation (text-only)
