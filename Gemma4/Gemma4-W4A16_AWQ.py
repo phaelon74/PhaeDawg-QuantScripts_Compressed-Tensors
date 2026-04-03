@@ -49,33 +49,56 @@ if not hasattr(_tmu, "TORCH_INIT_FUNCTIONS"):
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier, AWQMapping
 
-# Regex patterns use $ anchors so vision paths like *.q_proj.linear are not matched;
-# ignore list also excludes vision_tower / embed_vision.
-gemma4_awq_mappings = [
-    AWQMapping(
-        smooth_layer="re:.*input_layernorm$",
-        balance_layers=[
-            "re:.*self_attn\\.q_proj$",
-            "re:.*self_attn\\.k_proj$",
-            "re:.*self_attn\\.v_proj$",
-        ],
-    ),
-    AWQMapping(
-        smooth_layer="re:.*self_attn\\.v_proj$",
-        balance_layers=["re:.*self_attn\\.o_proj$"],
-    ),
-    AWQMapping(
-        smooth_layer="re:.*post_attention_layernorm$",
-        balance_layers=[
-            "re:.*mlp\\.gate_proj$",
-            "re:.*mlp\\.up_proj$",
-        ],
-    ),
-    AWQMapping(
-        smooth_layer="re:.*mlp\\.up_proj$",
-        balance_layers=["re:.*mlp\\.down_proj$"],
-    ),
-]
+
+def build_gemma4_awq_mappings(model) -> list:
+    """
+    One AWQMapping per (layer, logical edge). llm-compressor rejects regex that
+    matches multiple smooth layers (e.g. all input_layernorms at once).
+    Global-attn blocks may omit v_proj; skip v_proj smooth/balance entries then.
+    """
+    layers = model.language_model.layers
+    mappings = []
+    for i in range(len(layers)):
+        p = f"model.language_model.layers.{i}"
+        attn = layers[i].self_attn
+        has_v_proj = getattr(attn, "v_proj", None) is not None
+
+        pre_attn = [
+            f"{p}.self_attn.q_proj",
+            f"{p}.self_attn.k_proj",
+        ]
+        if has_v_proj:
+            pre_attn.append(f"{p}.self_attn.v_proj")
+        mappings.append(
+            AWQMapping(
+                smooth_layer=f"{p}.input_layernorm",
+                balance_layers=pre_attn,
+            )
+        )
+        if has_v_proj:
+            mappings.append(
+                AWQMapping(
+                    smooth_layer=f"{p}.self_attn.v_proj",
+                    balance_layers=[f"{p}.self_attn.o_proj"],
+                )
+            )
+        mappings.extend(
+            [
+                AWQMapping(
+                    smooth_layer=f"{p}.post_attention_layernorm",
+                    balance_layers=[
+                        f"{p}.mlp.gate_proj",
+                        f"{p}.mlp.up_proj",
+                    ],
+                ),
+                AWQMapping(
+                    smooth_layer=f"{p}.mlp.up_proj",
+                    balance_layers=[f"{p}.mlp.down_proj"],
+                ),
+            ]
+        )
+    return mappings
+
 
 # =========================
 # CLI
@@ -135,6 +158,12 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
 print(f"Loaded model: {MODEL_ID}")
 
+gemma4_awq_mappings = build_gemma4_awq_mappings(model)
+print(
+    f"AWQ mappings: {len(gemma4_awq_mappings)} "
+    f"({len(model.language_model.layers)} decoder layers; "
+    "3 or 4 attention mappings per layer depending on v_proj)"
+)
 
 # =========================
 # Dataset formatters (recipe: formatter + columns)
