@@ -55,8 +55,12 @@ def build_gemma4_awq_mappings(model) -> list:
     One AWQMapping per (layer, logical edge). llm-compressor rejects regex that
     matches multiple smooth layers (e.g. all input_layernorms at once).
     Global-attn blocks may omit v_proj; skip v_proj smooth/balance entries then.
+
+    Gemma4ForConditionalGeneration: inner backbone is model.model (Gemma4Model);
+    decoder stack is model.model.language_model. Module *names* for AWQ are still
+    model.language_model.layers.* (relative to the root conditional-gen module).
     """
-    layers = model.language_model.layers
+    layers = model.model.language_model.layers
     mappings = []
     for i in range(len(layers)):
         p = f"model.language_model.layers.{i}"
@@ -161,7 +165,7 @@ print(f"Loaded model: {MODEL_ID}")
 gemma4_awq_mappings = build_gemma4_awq_mappings(model)
 print(
     f"AWQ mappings: {len(gemma4_awq_mappings)} "
-    f"({len(model.language_model.layers)} decoder layers; "
+    f"({len(model.model.language_model.layers)} decoder layers; "
     "3 or 4 attention mappings per layer depending on v_proj)"
 )
 
