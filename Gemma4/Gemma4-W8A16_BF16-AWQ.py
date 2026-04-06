@@ -524,7 +524,7 @@ recipe = [
             "group_0": {
                 "targets": ["Linear"],
                 "weights": {
-                    "num_bits": 4,
+                    "num_bits": 8,
                     "type": "int",
                     "symmetric": True,
                     "strategy": "group",
