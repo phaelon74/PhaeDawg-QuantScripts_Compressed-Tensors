@@ -2,16 +2,17 @@
 Gemma 4 W8A16 GPTQ (single modifier, all Linears)
 
   GPTQModifier quantizes every targeted Linear (language model + compatible paths) with
-  Hessian-aware W8 group quantization. Vision tower / projector / lm_head are ignored.
+  Hessian-aware W8 **channel** (per-output-row) symmetric int8. Vision tower / projector /
+  lm_head are ignored.
 
-  - QuantizationScheme + QuantizationArgs (group symmetric int8, configurable group size)
-  - dampening_frac=0.1, actorder=\"static\", block_size=128 (match Qwen GPTQ script)
+  - QuantizationScheme + QuantizationArgs (strategy=channel, symmetric int8)
+  - dampening_frac=0.05, actorder=\"static\", block_size=128
   - Calibration from a YAML recipe (Recipes/Datasets/*.yaml), same schema as Qwen scripts
   - Gemma4ForConditionalGeneration + AutoProcessor save for vLLM multimodal paths
 
   Example:
     python Gemma4-W8A16_GPTQ.py /path/to/gemma-4-31B/ /path/to/out/ \\
-      ../Recipes/Datasets/General_reasoning.yaml --group-size 32
+      ../Recipes/Datasets/General_reasoning.yaml
 
   Optional --use-loss-mask: assistant-token-only loss; sets pipeline=sequential.
   loss_mask is padded to len(input_ids) for correct [batch, seq] alignment.
@@ -74,7 +75,7 @@ def _init_assistant_mask_chat_kw(tok) -> None:
 # CLI
 # =========================
 parser = argparse.ArgumentParser(
-    description="Gemma 4 W8A16 GPTQ only: recipe YAML + group size."
+    description="Gemma 4 W8A16 GPTQ only: channel weights, dampening 0.05, recipe YAML."
 )
 parser.add_argument("model_path", type=str, help="Path to the source model directory.")
 parser.add_argument("output_path", type=str, help="Path to save the quantized model.")
@@ -82,13 +83,6 @@ parser.add_argument(
     "recipe_yaml",
     type=str,
     help="Path to calibration recipe YAML (calibration_set.datasets, max_seq_length, etc.).",
-)
-parser.add_argument(
-    "--group-size",
-    type=int,
-    default=32,
-    choices=(32, 64, 128),
-    help="Quantization group size (default: 32).",
 )
 parser.add_argument(
     "--max-seq-length",
@@ -476,8 +470,7 @@ quant_scheme = QuantizationScheme(
         num_bits=8,
         type="int",
         symmetric=True,
-        strategy="group",
-        group_size=args.group_size,
+        strategy="channel",
     ),
     input_activations=None,
     output_activations=None,
@@ -487,14 +480,14 @@ recipe = [
     GPTQModifier(
         ignore=_RECIPE_IGNORE,
         config_groups={"group_0": quant_scheme},
-        dampening_frac=0.1,
+        dampening_frac=0.05,
         actorder="static",
         block_size=128,
     ),
 ]
 
 print(
-    f"\n=== Running W8A16 GPTQ (group_size={args.group_size}, "
+    f"\n=== Running W8A16 GPTQ (strategy=channel, dampening_frac=0.05, "
     f"use_loss_mask={use_loss_mask}) ==="
 )
 oneshot_kwargs = dict(
