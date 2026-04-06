@@ -14,7 +14,7 @@ Gemma 4 W4A16 AWQ (Activation-Aware Weight Quantization)
     python Gemma4-W4A16_AWQ.py /path/to/gemma-4-31B/ /path/to/out/ \\
       ../Recipes/Datasets/General_reasoning.yaml --group-size 32
 
-  W4 weights use asymmetric int4 (symmetric=False) for better scale/zero-point fit.
+  W4 weights use symmetric int4 (Marlin requirement: vLLM Marlin rejects zero-points with uint4b8).
   Optional --use-loss-mask: AWQ optimizes only assistant tokens (requires pipeline=sequential).
   loss_mask is padded to len(input_ids) so sequential AWQ hooks get a full [batch, seq] mask.
 
@@ -518,7 +518,7 @@ recipe = [
                 "weights": {
                     "num_bits": 4,
                     "type": "int",
-                    "symmetric": False,
+                    "symmetric": True,
                     "strategy": "group",
                     "group_size": args.group_size,
                 },
@@ -530,7 +530,7 @@ recipe = [
 
 print(
     f"\n=== Running W4A16 AWQ (group_size={args.group_size}, "
-    f"symmetric=False, use_loss_mask={use_loss_mask}) ==="
+    f"symmetric=True, use_loss_mask={use_loss_mask}) ==="
 )
 oneshot_kwargs = dict(
     model=model,
