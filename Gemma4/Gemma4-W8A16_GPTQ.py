@@ -1,21 +1,30 @@
 """
-Gemma 4 W8A16 GPTQ (single modifier, all Linears)
+Gemma 4 W8A16 GPTQ (single GPTQModifier; no stacked AWQ/GPTQ)
 
-  GPTQModifier quantizes every targeted Linear (language model + compatible paths) with
-  Hessian-aware W8 **channel** (per-output-row) symmetric int8. Vision tower / projector /
-  lm_head are ignored.
+  Default: Hessian-aware W8 **group** symmetric int8 (matches llm-compressor GPTQ examples).
+  Vision tower / projector / lm_head are always ignored.
 
-  - QuantizationScheme + QuantizationArgs (strategy=channel, symmetric int8)
-  - dampening_frac=0.05, actorder=\"static\", block_size=128
-  - Calibration from a YAML recipe (Recipes/Datasets/*.yaml), same schema as Qwen scripts
-  - Gemma4ForConditionalGeneration + AutoProcessor save for vLLM multimodal paths
+  **Do not use strategy=channel** on this stack for Gemma 4 without re-measuring KLD:
+  channel weights regressed KLD (~0.216 vs ~0.187 with group + group_size).
 
-  Example:
-    python Gemma4-W8A16_GPTQ.py /path/to/gemma-4-31B/ /path/to/out/ \\
-      ../Recipes/Datasets/General_reasoning.yaml
+  Optional --bf16-attention: skip quantizing self_attn q/k/v/o_proj (stay BF16); GPTQ
+  every other targeted Linear (MLP + any remaining LM Linears). Single modifier only.
+  **Validate in vLLM** that mixed BF16 attention + INT8 weights load and run for your
+  compressed-tensors recipe before production.
+
+  Tunables for sweeps: --group-size, --dampening-frac, --block-size, --offload-hessians.
+  Richer calibration (more YAML samples, longer max_seq_length, --use-loss-mask) often
+  beats micro-tuning dampening alone.
+
+  - actorder=\"static\" (dynamic actorder needs g_idx / kernel support)
+  - Calibration from Recipes/Datasets/*.yaml (same schema as Qwen GPTQ scripts)
+
+  Examples:
+    python Gemma4-W8A16_GPTQ.py MODEL OUT recipe.yaml --group-size 32
+    python Gemma4-W8A16_GPTQ.py MODEL OUT recipe.yaml --bf16-attention
+    python Gemma4-W8A16_GPTQ.py MODEL OUT recipe.yaml --dampening-frac 0.01 --offload-hessians
 
   Optional --use-loss-mask: assistant-token-only loss; sets pipeline=sequential.
-  loss_mask is padded to len(input_ids) for correct [batch, seq] alignment.
 
   Requires: pip install -U transformers llmcompressor compressed-tensors accelerate datasets pyyaml
   Note: Gemma 4 requires transformers >= 4.52 (or install from source).
@@ -75,7 +84,7 @@ def _init_assistant_mask_chat_kw(tok) -> None:
 # CLI
 # =========================
 parser = argparse.ArgumentParser(
-    description="Gemma 4 W8A16 GPTQ only: channel weights, dampening 0.05, recipe YAML."
+    description="Gemma 4 W8A16 GPTQ: group int8, optional BF16 attention, tunable dampening."
 )
 parser.add_argument("model_path", type=str, help="Path to the source model directory.")
 parser.add_argument("output_path", type=str, help="Path to save the quantized model.")
@@ -83,6 +92,37 @@ parser.add_argument(
     "recipe_yaml",
     type=str,
     help="Path to calibration recipe YAML (calibration_set.datasets, max_seq_length, etc.).",
+)
+parser.add_argument(
+    "--group-size",
+    type=int,
+    default=32,
+    choices=(32, 64, 128),
+    help="Weight group size (strategy=group). Default 32.",
+)
+parser.add_argument(
+    "--dampening-frac",
+    type=float,
+    default=0.05,
+    help="GPTQ Hessian dampening vs diagonal norm (try 0.01 / 0.05 / 0.1). Default 0.05.",
+)
+parser.add_argument(
+    "--block-size",
+    type=int,
+    default=128,
+    help="GPTQ columns processed per Hessian pass. Default 128.",
+)
+parser.add_argument(
+    "--bf16-attention",
+    action="store_true",
+    default=False,
+    help="Leave self_attn q/k/v/o_proj in BF16; GPTQ remaining Linears. Verify vLLM mixed layout.",
+)
+parser.add_argument(
+    "--offload-hessians",
+    action="store_true",
+    default=False,
+    help="GPTQ: offload Hessians to CPU; slower, lower VRAM (use to increase calib samples/seq).",
 )
 parser.add_argument(
     "--max-seq-length",
@@ -100,6 +140,7 @@ args = parser.parse_args()
 
 MODEL_ID = args.model_path
 use_loss_mask = args.use_loss_mask
+bf16_attention = args.bf16_attention
 
 # =========================
 # Recipe YAML (calibration_set)
@@ -118,6 +159,8 @@ datasets_config = calibration_config.get("datasets", [])
 print(f"Loaded recipe: {args.recipe_yaml}")
 print(f"  max_seq_length: {MAX_SEQUENCE_LENGTH}  shuffle: {SHUFFLE}  seed: {SEED}")
 print(f"  use_loss_mask: {use_loss_mask}")
+print(f"  bf16_attention: {bf16_attention}")
+print(f"  group_size: {args.group_size}  dampening_frac: {args.dampening_frac}")
 print(f"  dataset entries in recipe: {len(datasets_config)}")
 
 # =========================
@@ -137,7 +180,16 @@ if not getattr(tokenizer, "chat_template", None):
 _init_assistant_mask_chat_kw(tokenizer)
 print(f"Loaded model: {MODEL_ID}")
 _n_layers = len(model.model.language_model.layers)
-print(f"Language model decoder layers: {_n_layers} (full-model GPTQ on all Linears except ignore)")
+if bf16_attention:
+    print(
+        f"Language model decoder layers: {_n_layers} "
+        f"(GPTQ except self_attn q/k/v/o_proj → BF16; MLP etc. W8)"
+    )
+else:
+    print(
+        f"Language model decoder layers: {_n_layers} "
+        f"(full-model GPTQ on all LM Linears except ignore list)"
+    )
 
 # =========================
 # Dataset formatters (recipe: formatter + columns)
@@ -455,7 +507,7 @@ NUM_CALIBRATION_SAMPLES = len(ds)
 print(f"Tokenized {NUM_CALIBRATION_SAMPLES} samples for oneshot")
 
 # =========================
-# GPTQ only: all Linear targets except vision / projector / lm_head
+# GPTQ only: optional BF16 attention (single modifier)
 # =========================
 _RECIPE_IGNORE = [
     "lm_head",
@@ -463,6 +515,10 @@ _RECIPE_IGNORE = [
     "re:.*multi_modal_projector.*",
     "re:.*embed_vision.*",
 ]
+if bf16_attention:
+    _RECIPE_IGNORE = _RECIPE_IGNORE + [
+        r"re:.*self_attn\.(q|k|v|o)_proj$",
+    ]
 
 quant_scheme = QuantizationScheme(
     targets=["Linear"],
@@ -470,7 +526,8 @@ quant_scheme = QuantizationScheme(
         num_bits=8,
         type="int",
         symmetric=True,
-        strategy="channel",
+        strategy="group",
+        group_size=args.group_size,
     ),
     input_activations=None,
     output_activations=None,
@@ -480,14 +537,18 @@ recipe = [
     GPTQModifier(
         ignore=_RECIPE_IGNORE,
         config_groups={"group_0": quant_scheme},
-        dampening_frac=0.05,
+        dampening_frac=args.dampening_frac,
         actorder="static",
-        block_size=128,
+        block_size=args.block_size,
+        offload_hessians=args.offload_hessians,
     ),
 ]
 
+_mode = "BF16-attn + GPTQ(rest)" if bf16_attention else "full GPTQ"
 print(
-    f"\n=== Running W8A16 GPTQ (strategy=channel, dampening_frac=0.05, "
+    f"\n=== Running W8A16 GPTQ ({_mode}; strategy=group, "
+    f"group_size={args.group_size}, dampening_frac={args.dampening_frac}, "
+    f"block_size={args.block_size}, offload_hessians={args.offload_hessians}, "
     f"use_loss_mask={use_loss_mask}) ==="
 )
 oneshot_kwargs = dict(
