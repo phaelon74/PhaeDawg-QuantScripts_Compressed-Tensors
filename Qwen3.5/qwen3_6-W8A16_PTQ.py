@@ -145,6 +145,8 @@ recipe = QuantizationModifier(
         "re:.*visual.*",
         "re:.*linear_attn.*",
         "re:.*mtp.*",
+        "re:.*mlp.gate$",
+        "re:.*mlp.shared_expert_gate$",
     ],
 )
 
