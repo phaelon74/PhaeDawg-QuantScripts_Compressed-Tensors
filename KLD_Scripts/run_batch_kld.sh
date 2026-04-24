@@ -8,6 +8,10 @@
 #   ./run_batch_kld.sh /path/to/Models_KLD.json
 #   MODELS_KLD_JSON=/path/to/Models_KLD.json ./run_batch_kld.sh
 #
+# Resume: if ${resultsBasename}_KLD-Results.json already exists under outputDirectory,
+# any model with status "success" and a numeric meanKld is left unchanged; others
+# are re-run. Set KLD_FORCE_RERUN=1 to always run score_mode_kld for every model.
+#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,10 +39,24 @@ PARSE_PY="$SCRIPT_DIR/parse_mean_kld.py"
 
 CFG_ABS="$(cd "$(dirname "$CONFIG_JSON")" && pwd)/$(basename "$CONFIG_JSON")"
 
+if ! _jq_cfg_err="$(jq empty "$CFG_ABS" 2>&1)"; then
+  echo "error: config is not valid JSON: $CFG_ABS" >&2
+  printf '%s\n' "$_jq_cfg_err" | sed 's/^/  /' >&2
+  die "fix the JSON (common mistake: missing comma after the line above the one jq points to)."
+fi
+unset _jq_cfg_err
+
 VLLM_ROOT="$(jq -r '.vllmRepositoryRoot' "$CFG_ABS")"
 [[ -n "$VLLM_ROOT" && "$VLLM_ROOT" != "null" ]] || die "vllmRepositoryRoot missing in config"
+VLLM_ROOT="${VLLM_ROOT%/}"
+
+# scoreModeKldRelativePath: repo-relative (joined with vllmRepositoryRoot) or absolute path to score_mode_kld.py
 SCORE_REL="$(jq -r '.scoreModeKldRelativePath // "examples/offline_inference/score_mode_kld.py"' "$CFG_ABS")"
-SCORE_PY="$VLLM_ROOT/$SCORE_REL"
+if [[ "$SCORE_REL" == /* ]]; then
+  SCORE_PY="$SCORE_REL"
+else
+  SCORE_PY="$VLLM_ROOT/$SCORE_REL"
+fi
 [[ -f "$SCORE_PY" ]] || die "score_mode_kld script not found: $SCORE_PY"
 
 PROJECT="$(jq -r '.projectName // "KLD-Run"' "$CFG_ABS")"
@@ -47,6 +65,7 @@ OUT_DIR="$(jq -r '.outputDirectory // empty' "$CFG_ABS")"
 if [[ -z "$OUT_DIR" || "$OUT_DIR" == "null" ]]; then
   OUT_DIR="$SCRIPT_DIR/output"
 fi
+OUT_DIR="${OUT_DIR%/}"
 mkdir -p "$OUT_DIR/logs"
 
 DOWNLOAD_IF_MISSING="$(jq -r '.downloadIfMissing // true' "$CFG_ABS")"
@@ -74,6 +93,16 @@ MODELS_ARRAY_TMP="$(mktemp)"
 trap 'rm -f "$NDJSON_TMP" "$MODELS_ARRAY_TMP"' EXIT
 
 ISO_NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+RESUME_OK=0
+if [[ -z "${KLD_FORCE_RERUN:-}" && -f "$RESULTS_JSON" ]]; then
+  if jq empty "$RESULTS_JSON" >/dev/null 2>&1; then
+    RESUME_OK=1
+    echo "resume: using existing results at ${RESULTS_JSON} (models with numeric meanKld are skipped)." >&2
+  else
+    echo "warning: existing results file is not valid JSON; not resuming: ${RESULTS_JSON}" >&2
+  fi
+fi
 
 disk_usage_human() {
   local p="$1"
@@ -148,6 +177,20 @@ for ((i = 0; i < MODEL_LEN; i++)); do
   fi
 
   LOG_FILE="$OUT_DIR/logs/${MID}_kld.log"
+
+  if [[ "$RESUME_OK" -eq 1 ]]; then
+    CACHED_ROW="$(jq -c --arg id "$MID" '
+      .models[]?
+      | select(.id == $id)
+      | select(.status == "success")
+      | select((.meanKld | type) == "number")
+    ' "$RESULTS_JSON" 2>/dev/null | head -n1)"
+    if [[ -n "$CACHED_ROW" ]]; then
+      printf '%s\n' "$CACHED_ROW" >>"$NDJSON_TMP"
+      echo "resume: skipping KLD for ${MID} (meanKld already present)." >&2
+      continue
+    fi
+  fi
 
   if [[ "$IS_BASE" == "true" && "$RUN_KLD_BASE" != "true" && ! -d "$LOCAL" && "$DOWNLOAD_IF_MISSING" == "true" ]]; then
     mkdir -p "$LOCAL"
