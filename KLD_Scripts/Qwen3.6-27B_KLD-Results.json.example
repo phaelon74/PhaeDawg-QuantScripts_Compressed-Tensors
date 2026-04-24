@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "projectName": "Qwen3.6-27B-KLD",
+  "resultsBasename": "Qwen3.6-27B",
+  "generatedAt": "2026-04-24T12:00:00Z",
+  "configPath": "/home/phaedawg/KLD_Scripts/Models_KLD_Qwen3.6-27B.json",
+  "resultsPath": "/home/phaedawg/KLD_Scripts/output/Qwen3.6-27B_KLD-Results.json",
+  "baseModelId": "Qwen3.6-27B-FP8",
+  "vllmRepositoryRoot": "/home/phaedawg/vllm",
+  "dataset": "wikitext",
+  "datasetConfig": "wikitext-2-raw-v1",
+  "models": [
+    {
+      "id": "Qwen3.6-27B-FP8",
+      "isBase": true,
+      "huggingfaceId": "Qwen/Qwen3.6-27B-FP8",
+      "localPath": "/media/fmodels/Qwen/Qwen3.6-27B-FP8",
+      "diskUsageHuman": "28G",
+      "diskUsageKilobytes": 29360128,
+      "meanKld": null,
+      "status": "skipped",
+      "detail": "Base model; runKldOnBaseModel is false in config.",
+      "kldLogPath": null
+    },
+    {
+      "id": "Qwen3.6-27B-AWQ",
+      "isBase": false,
+      "huggingfaceId": "QuantTrio/Qwen3.6-27B-AWQ",
+      "localPath": "/media/fmodels/QuantTrio/Qwen3.6-27B-AWQ",
+      "diskUsageHuman": "16G",
+      "diskUsageKilobytes": 16777216,
+      "meanKld": 0.00291,
+      "status": "success",
+      "detail": null,
+      "kldLogPath": "/home/phaedawg/KLD_Scripts/output/logs/Qwen3.6-27B-AWQ_kld.log"
+    }
+  ]
+}

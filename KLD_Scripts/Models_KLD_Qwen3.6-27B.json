@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "projectName": "Qwen3.6-27B-KLD",
+  "resultsBasename": "Qwen3.6-27B",
+  "outputDirectory": "/home/phaedawg/KLD_Scripts/output",
+  "vllmRepositoryRoot": "/home/phaedawg/vllm",
+  "scoreModeKldRelativePath": "examples/offline_inference/score_mode_kld.py",
+  "dataset": "wikitext",
+  "datasetConfig": "wikitext-2-raw-v1",
+  "tensorParallelSize": 1,
+  "gpuMemoryUtilization": 0.85,
+  "defaultReferenceLogitsDir": "/home/phaedawg/nightly-kld-vllm-transformers5_5/vllm/ref_logits_Qwen3.6-27B_ctx2048_s512",
+  "modelsRoot": "/media/fmodels",
+  "downloadIfMissing": true,
+  "cleanupDownloadedModelAfterSuccess": true,
+  "runKldOnBaseModel": false,
+  "models": [
+    {
+      "id": "Qwen3.6-27B-FP8",
+      "isBase": true,
+      "huggingfaceId": "Qwen/Qwen3.6-27B-FP8",
+      "localPath": "/media/fmodels/Qwen/Qwen3.6-27B-FP8",
+      "referenceMode": "logits",
+      "referenceLogitsPath": "/home/phaedawg/nightly-kld-vllm-transformers5_5/vllm/ref_logits_Qwen3.6-27B_ctx2048_s512",
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-27B-AWQ",
+      "isBase": false,
+      "huggingfaceId": "QuantTrio/Qwen3.6-27B-AWQ",
+      "localPath": "/media/fmodels/QuantTrio/Qwen3.6-27B-AWQ",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-27B-NVFP4-vrfai",
+      "isBase": false,
+      "huggingfaceId": "vrfai/Qwen3.6-27B-NVFP4",
+      "localPath": "/media/fmodels/vrfai/Qwen3.6-27B-NVFP4",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-27B-NVFP4-mmangkad",
+      "isBase": false,
+      "huggingfaceId": "mmangkad/Qwen3.6-27B-NVFP4",
+      "localPath": "/media/fmodels/mmangkad/Qwen3.6-27B-NVFP4",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-27B-NVFP4A16",
+      "isBase": false,
+      "huggingfaceId": "selimaktas/Qwen3.6-27B-NVFP4A16",
+      "localPath": "/media/fmodels/selimaktas/Qwen3.6-27B-NVFP4A16",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-27B-NVFP4-prithivMLmods",
+      "isBase": false,
+      "huggingfaceId": "prithivMLmods/Qwen3.6-27B-NVFP4",
+      "localPath": "/media/fmodels/prithivMLmods/Qwen3.6-27B-NVFP4",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-27B-NVFP4-Abiray",
+      "isBase": false,
+      "huggingfaceId": "Abiray/Qwen3.6-27B-NVFP4",
+      "localPath": "/media/fmodels/Abiray/Qwen3.6-27B-NVFP4",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-27B-int4-AutoRound",
+      "isBase": false,
+      "huggingfaceId": "Lorbus/Qwen3.6-27B-int4-AutoRound",
+      "localPath": "/media/fmodels/Lorbus/Qwen3.6-27B-int4-AutoRound",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "projectName": "Example-KLD-Run",
+  "resultsBasename": "ExampleModel",
+  "generatedAt": "2026-04-24T12:00:00Z",
+  "configPath": "/home/phaedawg/KLD_Scripts/Models_KLD.json.example",
+  "resultsPath": "/home/phaedawg/KLD_Scripts/output/ExampleModel_KLD-Results.json",
+  "baseModelId": "ExampleBase-FP8",
+  "vllmRepositoryRoot": "/home/phaedawg/vllm",
+  "dataset": "wikitext",
+  "datasetConfig": "wikitext-2-raw-v1",
+  "models": [
+    {
+      "id": "ExampleBase-FP8",
+      "isBase": true,
+      "huggingfaceId": "org/ExampleBase-FP8",
+      "localPath": "/media/fmodels/org/ExampleBase-FP8",
+      "diskUsageHuman": "62G",
+      "diskUsageKilobytes": 65011712,
+      "meanKld": null,
+      "status": "skipped",
+      "detail": "Base model; runKldOnBaseModel is false in config.",
+      "kldLogPath": null
+    },
+    {
+      "id": "ExampleBase-AWQ",
+      "isBase": false,
+      "huggingfaceId": "quant/ExampleBase-AWQ",
+      "localPath": "/media/fmodels/quant/ExampleBase-AWQ",
+      "diskUsageHuman": "18G",
+      "diskUsageKilobytes": 18874368,
+      "meanKld": 0.00412,
+      "status": "success",
+      "detail": null,
+      "kldLogPath": "/home/phaedawg/KLD_Scripts/output/logs/ExampleBase-AWQ_kld.log"
+    }
+  ]
+}

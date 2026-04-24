@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "projectName": "Example-KLD-Run",
+  "resultsBasename": "ExampleModel",
+  "outputDirectory": "/home/phaedawg/KLD_Scripts/output",
+  "vllmRepositoryRoot": "/home/phaedawg/vllm",
+  "scoreModeKldRelativePath": "examples/offline_inference/score_mode_kld.py",
+  "dataset": "wikitext",
+  "datasetConfig": "wikitext-2-raw-v1",
+  "tensorParallelSize": 1,
+  "gpuMemoryUtilization": 0.85,
+  "defaultReferenceLogitsDir": "/home/phaedawg/nightly-kld-vllm-transformers5_5/vllm/ref_logits_ExampleBase_ctx2048_s512",
+  "modelsRoot": "/media/fmodels",
+  "downloadIfMissing": true,
+  "cleanupDownloadedModelAfterSuccess": true,
+  "runKldOnBaseModel": false,
+  "models": [
+    {
+      "id": "ExampleBase-FP8",
+      "isBase": true,
+      "huggingfaceId": "org/ExampleBase-FP8",
+      "localPath": "/media/fmodels/org/ExampleBase-FP8",
+      "referenceMode": "model",
+      "referenceModelPath": "/media/fmodels/google/ExampleBase-bf16",
+      "referenceLogitsPath": "/home/phaedawg/nightly-kld-vllm-transformers5_5/vllm/ref_logits_ExampleBase_ctx2048_s512"
+    },
+    {
+      "id": "ExampleBase-AWQ",
+      "isBase": false,
+      "huggingfaceId": "quant/ExampleBase-AWQ",
+      "localPath": "/media/fmodels/quant/ExampleBase-AWQ",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    }
+  ]
+}
