@@ -97,18 +97,34 @@ if getattr(config, "quantization_config", None) is not None:
 else:
     print("  No source quantization_config — loading directly in dtype=bfloat16.")
 
-# NOTE: After dequantization the model holds ~620 GB of BF16 weights
-# (310B params * 2 bytes). Make sure the host has enough CPU+GPU RAM via
-# device_map="auto", or pass an explicit max-memory dict if you need to
-# offload to disk.
-print(f"Loading model: {MODEL_ID}")
+# IMPORTANT — load to CPU only.
+#
+# Why not device_map="auto":
+#   accelerate's planner sizes the device map BEFORE dequantization, so it
+#   reads the on-disk FP8 footprint (~1 byte/param, ~315 GB total) and
+#   happily packs that into 4x 96 GB GPUs. But `dequantize=True` then
+#   materializes each weight as BF16 (~2 bytes/param) DURING the per-shard
+#   load — the planner never re-balances and the first GPU OOMs at ~11%.
+#
+# Why CPU works:
+#   310B params * 2 bytes BF16 = ~620 GB resident, plus ~50 GB for
+#   accelerate metadata / Python / dequantization scratch. With 768 GB
+#   system RAM you have ~98 GB headroom. The 4 GPUs sit idle during load
+#   and during the data-free RTN sweep, then `dispatch_model(model)`
+#   redistributes the much-smaller W4A16 weights (~155 GB total, ~40 GB
+#   per card) onto them right before the sample generation.
+#
+# Tradeoff: oneshot runs RTN on CPU. For 36,382 Linear modules this is
+# memory-bandwidth-bound, expect roughly 30-90 minutes total on a modern
+# multi-socket Xeon/EPYC. Acceptable for a one-shot quantization run.
+print(f"Loading model: {MODEL_ID}  (device_map=cpu)")
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     config=config,
     dtype=torch.bfloat16,
     trust_remote_code=True,
     low_cpu_mem_usage=True,
-    device_map="auto",
+    device_map={"": "cpu"},
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 print(f"Model class : {type(model).__name__}")
