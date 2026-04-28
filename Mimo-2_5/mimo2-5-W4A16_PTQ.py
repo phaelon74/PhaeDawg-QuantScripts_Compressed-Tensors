@@ -191,6 +191,38 @@ print("==========================================\n\n")
 # that vLLM's MiMoV2ForCausalLM loader expects.
 SAVE_DIR = args.output_path
 print(f"Saving to: {SAVE_DIR}")
+
+# --- Sanitize generation_config before save ---------------------------------
+# Xiaomi ships generation_config.json with `top_p=0.95` (and `temperature=1.0`)
+# but no explicit `do_sample=True`. Transformers v5 runs strict validation in
+# `GenerationConfig.save_pretrained()` and rejects sampling-only params unless
+# `do_sample=True` is set. We honor the model card recommendation (sampling
+# with top_p=0.95) by explicitly enabling sampling here. This only affects the
+# saved generation_config.json -- it does not change any quantized weights.
+gen_cfg = getattr(model, "generation_config", None)
+if gen_cfg is not None:
+    sample_only_attrs = ("top_p", "top_k", "typical_p", "epsilon_cutoff",
+                         "eta_cutoff", "temperature")
+    has_sample_only = any(
+        getattr(gen_cfg, a, None) is not None
+        and getattr(gen_cfg, a) not in (0, 0.0, 1.0 if a == "temperature" else None)
+        for a in sample_only_attrs
+    )
+    if has_sample_only and not getattr(gen_cfg, "do_sample", False):
+        print("[gen_cfg] Setting do_sample=True to satisfy strict validator "
+              "(top_p/temperature are present in generation_config.json).")
+        gen_cfg.do_sample = True
+    # Last-resort: if validation still trips, fall back to a minimal valid cfg.
+    try:
+        gen_cfg.validate(strict=True)
+    except Exception as e:
+        print(f"[gen_cfg] Strict validation still failed ({e}); "
+              "stripping sample-only params.")
+        for a in sample_only_attrs:
+            if hasattr(gen_cfg, a):
+                setattr(gen_cfg, a, None)
+        gen_cfg.do_sample = False
+
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 
