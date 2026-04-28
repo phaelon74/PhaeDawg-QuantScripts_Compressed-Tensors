@@ -67,31 +67,83 @@ def dequantize_block_fp8(
     block_size: tuple[int, int],
     out_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
-    """Dequantize a 2D FP8 block-quantized weight to `out_dtype`.
+    """Dequantize a block-FP8 weight to `out_dtype`.
 
-    Mirrors transformers.integrations.finegrained_fp8.Fp8Dequantize.convert()
-    but writes the FP32 intermediate into a destination buffer of the
-    target dtype to keep peak memory at ~3 bytes/param instead of 7.
+    Robust to MiMo / DeepSeek-V3-style **padded scale grids**, where
+    `scale_inv`'s implied row/col block count is LARGER than the on-disk
+    weight rows/cols. This happens for fused QKV when the K/V slices'
+    scale grids are rounded up to a multiple of the block size:
+
+        Q : 12288 rows -> 96 row-blocks
+        K :   768 rows -> padded to 8 row-blocks (256 phantom rows)
+        V :   512 rows -> 4 row-blocks
+                          total 108 row-blocks -> 3456 scale elements
+        weight on disk : 13568 rows (= 106 row-blocks)
+
+    Fix: derive the true block grid from `scale_inv.shape`, zero-pad the
+    weight up to the scale grid's implied size, multiply, then crop back
+    to the original weight shape. Phantom rows multiply zero -> contribute
+    zero output rows that are dropped during the crop.
     """
-    rows, cols = weight_fp8.shape[-2:]
     block_m, block_n = block_size
-    if rows % block_m != 0 or cols % block_n != 0:
+    orig_rows, orig_cols = weight_fp8.shape[-2:]
+    leading = weight_fp8.shape[:-2]
+
+    # 1. Determine the true block grid from scale_inv's shape.
+    if scale_inv.dim() >= 2:
+        sg_rows, sg_cols = scale_inv.shape[-2:]
+        sg_leading = scale_inv.shape[:-2]
+    else:
+        # Flat 1D scale: derive grid from weight (no padding case).
+        n_row_blocks = (orig_rows + block_m - 1) // block_m
+        n_col_blocks = (orig_cols + block_n - 1) // block_n
+        if n_row_blocks * n_col_blocks != scale_inv.numel():
+            raise ValueError(
+                f"Flat scale_inv numel={scale_inv.numel()} cannot be "
+                f"reshaped to grid {(n_row_blocks, n_col_blocks)} for "
+                f"weight shape {tuple(weight_fp8.shape)}"
+            )
+        scale_inv = scale_inv.reshape(n_row_blocks, n_col_blocks)
+        sg_rows, sg_cols = n_row_blocks, n_col_blocks
+        sg_leading = ()
+
+    if sg_leading != leading and sg_leading != ():
         raise ValueError(
-            f"weight shape {tuple(weight_fp8.shape)} not divisible by "
-            f"block_size {block_size}"
+            f"Leading dim mismatch: weight {leading}, scale {sg_leading}"
         )
 
-    # Cast FP8 -> FP32 (the intermediate the multiplication needs)
+    # 2. Pad weight up to the scale grid if needed (MiMo QKV case).
+    padded_rows = sg_rows * block_m
+    padded_cols = sg_cols * block_n
+    if padded_rows < orig_rows or padded_cols < orig_cols:
+        raise ValueError(
+            f"Scale grid {(sg_rows, sg_cols)} (-> {(padded_rows, padded_cols)} "
+            f"weight cells) is SMALLER than weight {tuple(weight_fp8.shape)}"
+        )
+    if padded_rows > orig_rows or padded_cols > orig_cols:
+        w_pad = torch.zeros(
+            *leading, padded_rows, padded_cols,
+            dtype=weight_fp8.dtype, device=weight_fp8.device,
+        )
+        w_pad[..., :orig_rows, :orig_cols] = weight_fp8
+        weight_fp8 = w_pad
+
+    # 3. Cast FP8 -> FP32, reshape into block tiles, multiply by scales.
     w_fp32 = weight_fp8.to(torch.float32)
     reshaped = w_fp32.reshape(
-        *weight_fp8.shape[:-2],
-        rows // block_m, block_m, cols // block_n, block_n,
+        *leading, sg_rows, block_m, sg_cols, block_n
     )
     expanded_scales = scale_inv.reshape(
-        *weight_fp8.shape[:-2],
-        rows // block_m, cols // block_n,
+        *sg_leading, sg_rows, sg_cols
     ).unsqueeze(-1).unsqueeze(-3)
-    dequantized = (reshaped * expanded_scales).reshape(weight_fp8.shape)
+    dequantized = (reshaped * expanded_scales).reshape(
+        *leading, padded_rows, padded_cols
+    )
+
+    # 4. Crop the padded rows/cols back off (phantom rows == zeros anyway).
+    if padded_rows > orig_rows or padded_cols > orig_cols:
+        dequantized = dequantized[..., :orig_rows, :orig_cols]
+
     out = dequantized.to(out_dtype)
 
     # Drop intermediates eagerly so peak stays low.
@@ -170,9 +222,19 @@ def main():
                     scale_key = key[:-len(".weight")] + ".weight_scale_inv"
                     w_fp8 = st.get_tensor(key)
                     scale = st.get_tensor(scale_key)
-                    out_tensors[key] = dequantize_block_fp8(
-                        w_fp8, scale, block_size, out_dtype
-                    )
+                    try:
+                        out_tensors[key] = dequantize_block_fp8(
+                            w_fp8, scale, block_size, out_dtype
+                        )
+                    except (RuntimeError, ValueError) as e:
+                        sys.stderr.write(
+                            f"\nFAIL on {key}\n"
+                            f"  weight  : shape={tuple(w_fp8.shape)} dtype={w_fp8.dtype} numel={w_fp8.numel()}\n"
+                            f"  scale   : shape={tuple(scale.shape)} dtype={scale.dtype} numel={scale.numel()}\n"
+                            f"  block   : {block_size}\n"
+                            f"  err     : {e}\n"
+                        )
+                        raise
                     del w_fp8, scale
                     total_dequant += 1
                 else:
