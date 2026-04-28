@@ -4,7 +4,7 @@ Scatter plot: mean KL divergence vs. on-disk model size.
 
 Reads quant definitions from JSON (see quants.json). Marker shape is determined
 by quant *type*; color by *creator*. Legend (upper right) lists each quant with
-its mean KLD; the plot shows only markers.
+its mean KLD, sorted best-to-worst (lowest KLD at top); the plot shows only markers.
 """
 
 from __future__ import annotations
@@ -125,7 +125,7 @@ def plot_from_payload(
     ax.set_ylim(max(0.0, min(ys) - y_pad), max(ys) + y_pad)
 
     legend_handles: list[Line2D] = []
-    for q in quants:
+    for q in sorted(quants, key=lambda q: float(q["mean_kld"])):
         creator = str(q["creator"])
         qtype = str(q["type"])
         qid = str(q.get("id", f'{creator}/{q.get("model", "")}'))

@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "projectName": "Qwen3.6-35B-A3B-KLD",
+  "resultsBasename": "Qwen3.6-35B-A3B",
+  "outputDirectory": "/home/phaedawg/KLD_Receipts/",
+  "vllmRepositoryRoot": "/home/phaedawg/nightly-kld-vllm/kld-vllm",
+  "scoreModeKldRelativePath": "examples/offline_inference/score_mode_kld.py",
+  "dataset": "wikitext",
+  "datasetConfig": "wikitext-2-raw-v1",
+  "tensorParallelSize": 1,
+  "gpuMemoryUtilization": 0.85,
+  "defaultReferenceLogitsDir": "/home/phaedawg/nightly-kld-vllm/kld-vllm/ref_logits_Qwen3.6-35B-A3B_ctx2048_s512",
+  "modelsRoot": "/media/fmodels",
+  "downloadIfMissing": true,
+  "cleanupDownloadedModelAfterSuccess": true,
+  "runKldOnBaseModel": false,
+  "models": [
+    {
+      "id": "Qwen3.6-35B-A3B",
+      "isBase": true,
+      "huggingfaceId": "Qwen/Qwen3.6-35B-A3B",
+      "localPath": "/media/fmodels/Qwen/Qwen3.6-35B-A3B",
+      "referenceMode": "logits",
+      "referenceLogitsPath": "/home/phaedawg/nightly-kld-vllm/kld-vllm/ref_logits_Qwen3.6-35B-A3B_ctx2048_s512",
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-35B-A3B-FP8",
+      "isBase": false,
+      "huggingfaceId": "Qwen/Qwen3.6-35B-A3B-FP8",
+      "localPath": "/media/fmodels/Qwen/Qwen3.6-35B-A3B-FP8",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-35B-A3B-NVFP4-RedHatAI",
+      "isBase": false,
+      "huggingfaceId": "RedHatAI/Qwen3.6-35B-A3B-NVFP4",
+      "localPath": "/media/fmodels/RedHatAI/Qwen3.6-35B-A3B-NVFP4",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-35B-A3B-AWQ-4bit-cyankiwi",
+      "isBase": false,
+      "huggingfaceId": "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit",
+      "localPath": "/media/fmodels/cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-35B-A3B-AWQ-QuantTrio",
+      "isBase": false,
+      "huggingfaceId": "QuantTrio/Qwen3.6-35B-A3B-AWQ",
+      "localPath": "/media/fmodels/QuantTrio/Qwen3.6-35B-A3B-AWQ",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-35B-A3B-GPTQ-Int4-palmfuture",
+      "isBase": false,
+      "huggingfaceId": "palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4",
+      "localPath": "/media/fmodels/palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-35B-A3B-NVFP4-mmangkad",
+      "isBase": false,
+      "huggingfaceId": "mmangkad/Qwen3.6-35B-A3B-NVFP4",
+      "localPath": "/media/fmodels/mmangkad/Qwen3.6-35B-A3B-NVFP4",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-35B-A3B-NVFP4-sakamakismile",
+      "isBase": false,
+      "huggingfaceId": "sakamakismile/Qwen3.6-35B-A3B-NVFP4",
+      "localPath": "/media/fmodels/sakamakismile/Qwen3.6-35B-A3B-NVFP4",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-35B-A3B-GPTQ-4bit-btbtyler09",
+      "isBase": false,
+      "huggingfaceId": "btbtyler09/Qwen3.6-35B-A3B-GPTQ-4bit",
+      "localPath": "/media/fmodels/btbtyler09/Qwen3.6-35B-A3B-GPTQ-4bit",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-35B-A3B-INT8-AutoRound",
+      "isBase": false,
+      "huggingfaceId": "Minachist/Qwen3.6-35B-A3B-INT8-AutoRound",
+      "localPath": "/media/fmodels/Minachist/Qwen3.6-35B-A3B-INT8-AutoRound",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-35B-A3B-INT8-TheHouseOfTheDude",
+      "isBase": false,
+      "huggingfaceId": "TheHouseOfTheDude/Qwen3.6-35B-A3B_INT8",
+      "localPath": "/media/fmodels/TheHouseOfTheDude/Qwen3.6-35B-A3B_INT8",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-35B-A3B-INT4-TheHouseOfTheDude",
+      "isBase": false,
+      "huggingfaceId": "TheHouseOfTheDude/Qwen3.6-35B-A3B_INT4",
+      "localPath": "/media/fmodels/TheHouseOfTheDude/Qwen3.6-35B-A3B_INT4",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    },
+    {
+      "id": "Qwen3.6-35B-A3B-HLWQ-CT-INT4",
+      "isBase": false,
+      "huggingfaceId": "caiovicentino1/Qwen3.6-35B-A3B-HLWQ-CT-INT4",
+      "localPath": "/media/fmodels/caiovicentino1/Qwen3.6-35B-A3B-HLWQ-CT-INT4",
+      "referenceMode": "logits",
+      "referenceLogitsPath": null,
+      "referenceModelPath": null
+    }
+  ]
+}

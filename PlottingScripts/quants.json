@@ -1,41 +1,76 @@
 {
-  "title": "Qwen3.6-27B Quantization Analysis",
+  "title": "Qwen3.6-35B-A3B Quantization Analysis",
   "subtitle": "Mean KL Divergence vs. Model File Size",
   "quants": [
     {
-      "id": "TheHouseOfTheDude/Qwen3.6-27B-INT8",
-      "creator": "TheHouseOfTheDude",
-      "type": "INT8",
-      "disk_size_gib": 34,
-      "mean_kld": 0.009441
+      "id": "Qwen/Qwen3.6-35B-A3B-FP8",
+      "creator": "Qwen",
+      "type": "FP8",
+      "disk_size_gib": 34.92,
+      "mean_kld": 0.015797
     },
     {
-      "id": "TheHouseOfTheDude/Qwen3.6-27B-NVFP4",
-      "creator": "TheHouseOfTheDude",
+      "id": "RedHatAI/Qwen3.6-35B-A3B-NVFP4",
+      "creator": "RedHatAI",
       "type": "NVFP4",
-      "disk_size_gib": 26,
-      "mean_kld": 0.062114
+      "disk_size_gib": 23.35,
+      "mean_kld": 0.067781
     },
     {
-      "id": "sakamakismile/Qwen3.6-27B-NVFP4",
-      "creator": "sakamakismile",
-      "type": "NVFP4",
-      "disk_size_gib": 19,
-      "mean_kld": 0.188892
-    },
-    {
-      "id": "cyankiwi/Qwen3.6-27B-AWQ-INT4",
+      "id": "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit",
       "creator": "cyankiwi",
       "type": "AWQ-INT4",
-      "disk_size_gib": 20,
-      "mean_kld": 0.050955
+      "disk_size_gib": 22.8,
+      "mean_kld": 0.022889
     },
     {
-      "id": "cyankiwi/Qwen3.6-27B-AWQ-BF16-INT4",
-      "creator": "cyankiwi",
-      "type": "AWQ-BF16-INT4",
-      "disk_size_gib": 27,
-      "mean_kld": 0.042015
+      "id": "QuantTrio/Qwen3.6-35B-A3B-AWQ",
+      "creator": "QuantTrio",
+      "type": "AWQ-INT4",
+      "disk_size_gib": 23.74,
+      "mean_kld": 0.026317
+    },
+    {
+      "id": "palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4",
+      "creator": "palmfuture",
+      "type": "GPTQ-INT4",
+      "disk_size_gib": 21.21,
+      "mean_kld": 0.034885
+    },
+    {
+      "id": "mmangkad/Qwen3.6-35B-A3B-NVFP4",
+      "creator": "mmangkad",
+      "type": "NVFP4",
+      "disk_size_gib": 23.9,
+      "mean_kld": 0.040314
+    },
+    {
+      "id": "sakamakismile/Qwen3.6-35B-A3B-NVFP4",
+      "creator": "sakamakismile",
+      "type": "NVFP4",
+      "disk_size_gib": 20.42,
+      "mean_kld": 0.176545
+    },
+    {
+      "id": "btbtyler09/Qwen3.6-35B-A3B-GPTQ-4bit",
+      "creator": "btbtyler09",
+      "type": "GPTQ-INT4",
+      "disk_size_gib": 24.55,
+      "mean_kld": 0.023272
+    },
+    {
+      "id": "Minachist/Qwen3.6-35B-A3B-INT8-AutoRound",
+      "creator": "Minachist",
+      "type": "INT8",
+      "disk_size_gib": 37.71,
+      "mean_kld": 0.00711
+    },
+    {
+      "id": "TheHouseOfTheDude/Qwen3.6-35B-A3B_INT8",
+      "creator": "TheHouseOfTheDude",
+      "type": "INT8",
+      "disk_size_gib": 35.11,
+      "mean_kld": 0.007666
     }
   ]
 }
