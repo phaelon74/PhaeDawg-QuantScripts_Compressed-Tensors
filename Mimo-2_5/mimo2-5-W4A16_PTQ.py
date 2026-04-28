@@ -174,13 +174,13 @@ oneshot(model=model, recipe=recipe)
 # =========================
 # Quick sanity generation (text-only, vision/audio paths untouched)
 # =========================
-print("\n\n========== SAMPLE GENERATION ==============")
-dispatch_model(model)
-prompt = "Hello, I am MiMo. Please introduce yourself in one sentence."
-input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
-output = model.generate(input_ids, max_new_tokens=100, do_sample=False)
-print(tokenizer.decode(output[0], skip_special_tokens=True))
-print("==========================================\n\n")
+#print("\n\n========== SAMPLE GENERATION ==============")
+#dispatch_model(model)
+#prompt = "Hello, I am MiMo. Please introduce yourself in one sentence."
+#input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
+#output = model.generate(input_ids, max_new_tokens=100, do_sample=False)
+#print(tokenizer.decode(output[0], skip_special_tokens=True))
+#print("==========================================\n\n")
 
 # =========================
 # Save compressed model
