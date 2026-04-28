@@ -1,123 +1,59 @@
 """
-Qwen3.6 W8A16 PTQ (Post-Training Quantization)
+MiMo-V2.5 (XiaomiMiMo/MiMo-V2.5) W4A16 PTQ — Post-Training Quantization
 
-  - QuantizationModifier with preset scheme (no AWQ, no GPTQ)
-  - AutoModelForImageTextToText to preserve VLM weight paths for vLLM
-  - No calibration dataset needed
-  - W8A16 preset: INT8 per-channel symmetric weights, FP16/BF16 activations
-  - Post-save key remap to fix Transformers v5 double-nested weight paths
+Source model     : MiMoV2ForCausalLM, model_type="mimo_v2"
+                   310B total / 15B activated (sparse MoE, 256 routed experts × 8/tok)
+                   Native omnimodal: text + vision (MiMoVisionTransformer)
+                                              + audio (MiMoAudioEncoder)
+                   Hybrid SWA + GA attention, dual RoPE thetas, attention sinks,
+                   3-layer MTP, and a dense layer 0 (intermediate=16384).
+Source format    : FP8 (E4M3, dynamic activations, block 128x128) — already
+                   quantized by Xiaomi; `compressed_tensors` will load every
+                   nn.Linear as `CompressedLinear` (still a `nn.Linear` subclass
+                   so `targets="Linear"` matches it during requantization).
+
+Why this recipe :
+  * `QuantizationModifier` (RTN), no AWQ / GPTQ / SmoothQuant.
+    -> No calibration dataset needed.
+    -> No `CalibrationMimoV2MoE` definition exists in
+       llm-compressor.modeling yet (only glm4_moe / qwen3_moe / qwen3_5_moe
+       / qwen3_vl_moe), so any data-driven algorithm would silently miscalibrate
+       the unactivated experts. RTN sidesteps this entirely.
+  * W4A16 preset: 4-bit group-128 weights, BF16 activations.
+  * `trust_remote_code=True` is mandatory: `mimo_v2` is not yet in
+    transformers' CONFIG_MAPPING_NAMES (HF PR #45144 only adds MiMo-V2-Flash,
+    not the V2.5 omnimodal variant).
+  * `AutoModelForCausalLM` (NOT ImageTextToText): the registered architecture
+    is `MiMoV2ForCausalLM`, with `visual` / `audio_encoder` / `speech_embeddings`
+    as flat top-level siblings of `model` (verified via probe_mimo_v2_5.py).
+    Therefore NO post-save key remapping is needed (unlike Qwen3.6 VLM).
+
+Disk space note  : Saved W4A16 output is ~155 GB (310B params * 0.5 byte/param
+                   + scales/zeros). Source FP8 on disk is ~315 GB. No BF16
+                   intermediate is materialized to disk.
 """
 import argparse
-import glob
-import os
 
-import torch.nn as nn
 from compressed_tensors.offload import dispatch_model
-from safetensors import safe_open
-from safetensors.torch import save_file
-from transformers import AutoModelForImageTextToText, AutoTokenizer
-
-# Transformers v5 compatibility
-import transformers.modeling_utils as _tmu
-if not hasattr(_tmu, "TORCH_INIT_FUNCTIONS"):
-    _tmu.TORCH_INIT_FUNCTIONS = {
-        "uniform_": nn.init.uniform_,
-        "normal_": nn.init.normal_,
-        "trunc_normal_": nn.init.trunc_normal_,
-        "constant_": nn.init.constant_,
-        "xavier_uniform_": nn.init.xavier_uniform_,
-        "xavier_normal_": nn.init.xavier_normal_,
-        "kaiming_uniform_": nn.init.kaiming_uniform_,
-        "kaiming_normal_": nn.init.kaiming_normal_,
-        "uniform": nn.init.uniform,
-        "normal": nn.init.normal,
-        "xavier_uniform": nn.init.xavier_uniform,
-        "xavier_normal": nn.init.xavier_normal,
-        "kaiming_uniform": nn.init.kaiming_uniform,
-        "kaiming_normal": nn.init.kaiming_normal,
-    }
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import QuantizationModifier
-
-# =========================
-# Transformers v5 save_pretrained workaround
-#
-# Transformers v5's composable model uses different internal attribute names
-# than the checkpoint format (e.g. double-nested "language_model.language_model").
-# save_pretrained writes these raw attribute names, producing keys vLLM cannot
-# load. We fix this after saving, preserving safetensors metadata.
-# =========================
-KEY_REMAPS = [
-    ("model.language_model.language_model.", "model.language_model."),
-    ("model.language_model.visual.", "model.visual."),
-]
-
-
-def fix_saved_weight_keys(save_dir):
-    """Remap double-nested weight keys in saved safetensors files."""
-    safetensor_files = sorted(glob.glob(os.path.join(save_dir, "*.safetensors")))
-    if not safetensor_files:
-        return
-
-    for fpath in safetensor_files:
-        with safe_open(fpath, framework="pt") as f:
-            metadata = f.metadata() or {}
-            orig_keys = list(f.keys())
-
-            print(f"\n  --- {os.path.basename(fpath)} ---")
-            print(f"  Raw keys from save_pretrained (first 10):")
-            for k in orig_keys[:10]:
-                print(f"    {k}")
-
-            new_tensors = {}
-            remapped_count = 0
-            for key in orig_keys:
-                new_key = key
-                changed = True
-                while changed:
-                    changed = False
-                    for old_prefix, new_prefix in KEY_REMAPS:
-                        if new_key.startswith(old_prefix):
-                            new_key = new_prefix + new_key[len(old_prefix):]
-                            changed = True
-                            break
-                if new_key != key:
-                    remapped_count += 1
-                new_tensors[new_key] = f.get_tensor(key).clone()
-
-        sorted_keys = sorted(new_tensors.keys())
-        print(f"  Remapped {remapped_count}/{len(sorted_keys)} keys")
-        print(f"  First 10 keys AFTER remap:")
-        for k in sorted_keys[:10]:
-            print(f"    {k}")
-
-        tmp_path = fpath + ".tmp"
-        save_file(new_tensors, tmp_path, metadata=metadata)
-        os.replace(tmp_path, fpath)
-        del new_tensors
-        print(f"  Saved {os.path.basename(fpath)} ({len(sorted_keys)} tensors)")
-
-    prefixes = set()
-    for fpath in safetensor_files:
-        with safe_open(fpath, framework="pt") as f:
-            for key in f.keys():
-                prefixes.add(".".join(key.split(".")[:3]))
-    print("\n=== Saved weight key prefixes ===")
-    for p in sorted(prefixes):
-        print(f"  {p}")
-    print()
 
 
 # =========================
 # Parse Command-Line Arguments
 # =========================
 parser = argparse.ArgumentParser(
-    description="Run W8A16 PTQ on Qwen3.6 (e.g., Qwen3.6-35B-A3B). No calibration data needed."
+    description=(
+        "Run W4A16 RTN PTQ on XiaomiMiMo/MiMo-V2.5. No calibration data needed. "
+        "Source FP8 (E4M3, block 128x128) -> output W4A16 (group-128) "
+        "compressed-tensors checkpoint, loadable in vLLM nightly as "
+        "MiMoV2ForCausalLM."
+    )
 )
 parser.add_argument("model_path", type=str, help="Path to the source model directory.")
 parser.add_argument("output_path", type=str, help="Path to save quantized model.")
-
 args = parser.parse_args()
 
 # =========================
@@ -125,57 +61,117 @@ args = parser.parse_args()
 # =========================
 MODEL_ID = args.model_path
 
-# AutoModelForImageTextToText saves weights with language_model.layers.* paths
-# that vLLM's Qwen3.5 implementation expects. AutoModelForCausalLM saves with
-# model.layers.* which causes weight loading failures in vLLM.
-model = AutoModelForImageTextToText.from_pretrained(MODEL_ID, dtype="auto", trust_remote_code=True)
+# `dtype="auto"` honors the source FP8 quantization_config and produces
+# `CompressedLinear` modules (subclass of nn.Linear), which the
+# QuantizationModifier targets="Linear" rule still matches. The FP8 weights
+# are dequantized on-the-fly by compressed_tensors when llm-compressor reads
+# them for re-quantization.
+#
+# `trust_remote_code=True` is REQUIRED (mimo_v2 not in CONFIG_MAPPING_NAMES
+# even on transformers 5.6.2 — see HF PR #45144).
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    dtype="auto",
+    trust_remote_code=True,
+    low_cpu_mem_usage=True,
+)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 print(f"Loaded model: {MODEL_ID}")
+print(f"Model class : {type(model).__name__}")
 
 # =========================
-# Quantization recipe — matches NVFP4A16 reference pattern
+# Quantization recipe — MiMo-V2.5 W4A16 RTN
 # =========================
-# W8A16 preset: INT8 per-channel symmetric weights, activations untouched.
-# Ignore list matches the working NVFP4A16 reference exactly.
+# Verified against probe_mimo_v2_5.py output (23 unique nn.Linear templates,
+# 36,382 total Linear modules) and Xiaomi's own FP8 release ignore list.
+#
+# Quantization candidates (kept):
+#   model.layers.{N}.self_attn.qkv_proj           48x   in=4096  out=13568  (fused QKV)
+#   model.layers.{N}.mlp.{gate,up,down}_proj      ~2x   layer 1..47 dense MLP-like (none — see note)
+#   model.layers.{N}.mlp.experts.{N}.{g,u,d}_proj 12032x each   (47 layers x 256 experts, the bulk)
+#
+# Skipped (see ignore list below):
+#   lm_head, all self_attn.o_proj, layer 0 (dense, 16384 intermediate),
+#   MoE router gate (custom Parameter container, not nn.Linear, defensive),
+#   visual / audio_encoder / speech_embeddings (multimodal towers),
+#   model.mtp.* (multi-token prediction layers).
 recipe = QuantizationModifier(
     targets="Linear",
     scheme="W4A16",
     ignore=[
+        # 1. Output head (always skip; tied/untied — MiMo has tie_word_embeddings=False)
         "lm_head",
-        "re:.*visual.*",
-        "re:.*linear_attn.*",
+
+        # 2. Mirror Xiaomi's FP8 release: ALL attention output projections.
+        #    Their ignored_layers excludes every model.layers.{0..47}.self_attn.o_proj
+        #    plus model.decoder.self_attn.o_proj (audio decoder o_proj — not present
+        #    in current MiMo-V2.5 module tree but covered by audio_encoder ignore).
+        "re:.*self_attn\\.o_proj$",
+
+        # 3. Dense layer 0 (the only non-MoE FFN, intermediate_size=16384).
+        #    Per the GLM-4.7 W4A16 example pattern; this layer is the
+        #    perception->reasoning bottleneck and disproportionately sensitive
+        #    at 4-bit. Comment this line out if you want maximum compression.
+        "re:^model\\.layers\\.0\\..*",
+
+        # 4. MoE router gate: MiMoV2MoEGate is a custom Parameter container,
+        #    not nn.Linear (verified via probe). This regex is defensive and
+        #    won't match anything in practice; harmless to keep.
+        "re:.*mlp\\.gate$",
+
+        # 5. Vision tower — MiMoVisionTransformer (~728M params, 28 blocks).
+        #    Includes visual.blocks.{N}.{attn.qkv, attn.proj, mlp.{g,u,d}_proj}
+        #    and visual.merger.mlp.{0,1}.
+        "re:^visual\\..*",
+
+        # 6. Audio encoder — MiMoAudioEncoder (~390M params).
+        #    Includes audio_encoder.input_local_transformer.layers.{0..5}.*
+        #    (Qwen2DecoderLayer, q/k/v/o_proj + mlp.{g,u,d}_proj) and
+        #    audio_encoder.projection.mlp.{0,1}.
+        "re:^audio_encoder\\..*",
+
+        # 7. Multi-Token Prediction layers (3 layers, ~329M params).
+        #    Their internal Linear paths collapse onto the same templates as
+        #    model.layers.{N}.* under regex templating, so we explicitly
+        #    exclude the mtp branch.
         "re:.*mtp.*",
-        "re:.*mlp.gate$",
-        "re:.*mlp.shared_expert_gate$",
+
+        # 8. Speech embeddings (20x nn.Embedding) — not Linear, defensive.
+        "re:^speech_embeddings.*",
     ],
 )
 
 # =========================
-# Apply quantization (no calibration data needed for W8A16 PTQ)
+# Apply quantization (no calibration data needed — RTN)
 # =========================
-print("\n=== Running W8A16 PTQ ===")
+print("\n=== Running W4A16 RTN PTQ on MiMo-V2.5 ===")
 oneshot(model=model, recipe=recipe)
 
 # =========================
-# Quick sanity generation
+# Quick sanity generation (text-only, vision/audio paths untouched)
 # =========================
 print("\n\n========== SAMPLE GENERATION ==============")
 dispatch_model(model)
-input_ids = tokenizer("Hello my name is", return_tensors="pt").input_ids.to(model.device)
-output = model.generate(input_ids, max_new_tokens=100)
+prompt = "Hello, I am MiMo. Please introduce yourself in one sentence."
+input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
+output = model.generate(input_ids, max_new_tokens=100, do_sample=False)
 print(tokenizer.decode(output[0], skip_special_tokens=True))
 print("==========================================\n\n")
 
 # =========================
 # Save compressed model
 # =========================
+# No KEY_REMAPS / fix_saved_weight_keys is required for MiMo-V2.5: its
+# saved weight keys (model.layers.*, lm_head.weight, visual.*, audio_encoder.*,
+# speech_embeddings.{N}.*, model.mtp.*) are already in the canonical layout
+# that vLLM's MiMoV2ForCausalLM loader expects.
 SAVE_DIR = args.output_path
 print(f"Saving to: {SAVE_DIR}")
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 
-# Fix weight keys mangled by transformers v5
-fix_saved_weight_keys(SAVE_DIR)
-
 print("\n=== Complete ===")
 print("Saved to:", SAVE_DIR)
+print("Load in vLLM nightly:")
+print("  from vllm import LLM")
+print(f"  llm = LLM(model='{SAVE_DIR}', trust_remote_code=True)")
