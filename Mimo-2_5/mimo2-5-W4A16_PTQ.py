@@ -7,10 +7,13 @@ Source model     : MiMoV2ForCausalLM, model_type="mimo_v2"
                                               + audio (MiMoAudioEncoder)
                    Hybrid SWA + GA attention, dual RoPE thetas, attention sinks,
                    3-layer MTP, and a dense layer 0 (intermediate=16384).
-Source format    : FP8 (E4M3, dynamic activations, block 128x128) — already
-                   quantized by Xiaomi; `compressed_tensors` will load every
-                   nn.Linear as `CompressedLinear` (still a `nn.Linear` subclass
-                   so `targets="Linear"` matches it during requantization).
+Source format    : BF16 (already dequantized from Xiaomi's FP8 release via
+                   the companion `dequantize_fp8_to_bf16.py` streaming script).
+                   Reason: transformers v5.x's in-process `dequantize=True`
+                   path keeps both the FP8 source and FP32 dequant
+                   intermediates resident across 4 worker threads, pushing
+                   peak CPU RAM past 1.3 TB on a 310B model. Pre-dequantizing
+                   to disk caps load-time peak at ~700 GB.
 
 Why this recipe :
   * `QuantizationModifier` (RTN), no AWQ / GPTQ / SmoothQuant.
@@ -62,61 +65,31 @@ args = parser.parse_args()
 # =========================
 MODEL_ID = args.model_path
 
-# MiMo-V2.5 is shipped pre-quantized in FP8 (E4M3, block 128x128). Loading
-# with the default FineGrainedFP8 quantizer is BROKEN for this MoE topology:
-# `replace_with_fp8_linear` fuses `model.layers.{N}.mlp.experts` into a single
-# `FP8Experts` module, then later iterations try to traverse `experts.0.*`
-# and crash with `AttributeError: FP8Experts has no attribute '0'`.
+# MIMO-V2.5 LOAD PLAN
+# ===================
+# Input is the BF16 model produced by `dequantize_fp8_to_bf16.py`. Its
+# config.json has had `quantization_config` stripped, so transformers loads
+# straight into vanilla nn.Linear modules with BF16 weights — no FP8
+# quantizer involvement, no FP32 intermediates, no FP8Experts MoE bug.
 #
-# Official escape hatch (transformers v5.x, src/transformers/integrations/
-# finegrained_fp8.py:732 + utils/quantization_config.py:1671):
+# Memory budget (for the 310B MiMo-V2.5):
+#   ~620 GB BF16 resident + ~30 GB Python/torch overhead + ~20 GB working
+#   buffers during oneshot ≈ 670 GB peak CPU RAM. Fits in 768 GB with
+#   ~100 GB headroom.
 #
-#     FineGrainedFP8Config.dequantize: bool = False
+# Device map is CPU. The 4 GPUs are not used during load or during the
+# RTN sweep (all CPU). `dispatch_model(model)` after oneshot redistributes
+# the much-smaller W4A16 weights (~155 GB, ~40 GB/card) for sample-gen.
 #
-# When set to True, `replace_with_fp8_linear` early-returns AND the FP8 +
-# weight_scale_inv on-disk tensors are unpacked to BF16 nn.Linear weights
-# via the built-in per-block dequantization (line 889:
-#   dequantized = reshaped * expanded_scales
-# ). This is the same path DeepSeek-V3 users use for FP8 -> BF16 conversion.
-#
-# `trust_remote_code=True` is REQUIRED (mimo_v2 not in CONFIG_MAPPING_NAMES
-# even on transformers 5.6.2 — see HF PR #45144).
+# `trust_remote_code=True` remains REQUIRED (mimo_v2 not in
+# CONFIG_MAPPING_NAMES even on transformers 5.6.2 — HF PR #45144).
 print(f"Loading config from: {MODEL_ID}")
 config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
-
 if getattr(config, "quantization_config", None) is not None:
-    qc = config.quantization_config
-    if isinstance(qc, dict):
-        qc["dequantize"] = True
-        qmethod = qc.get("quant_method", "?")
-    else:
-        qc.dequantize = True
-        qmethod = getattr(qc, "quant_method", "?")
-    print(f"  Source quant_method='{qmethod}', set dequantize=True "
-          f"(weights will be unpacked to BF16 on load).")
-else:
-    print("  No source quantization_config — loading directly in dtype=bfloat16.")
+    print("  WARNING: source still has a quantization_config. Did you point")
+    print("  this script at the FP8 source instead of the BF16 dequantized")
+    print("  output? Run dequantize_fp8_to_bf16.py first.")
 
-# IMPORTANT — load to CPU only.
-#
-# Why not device_map="auto":
-#   accelerate's planner sizes the device map BEFORE dequantization, so it
-#   reads the on-disk FP8 footprint (~1 byte/param, ~315 GB total) and
-#   happily packs that into 4x 96 GB GPUs. But `dequantize=True` then
-#   materializes each weight as BF16 (~2 bytes/param) DURING the per-shard
-#   load — the planner never re-balances and the first GPU OOMs at ~11%.
-#
-# Why CPU works:
-#   310B params * 2 bytes BF16 = ~620 GB resident, plus ~50 GB for
-#   accelerate metadata / Python / dequantization scratch. With 768 GB
-#   system RAM you have ~98 GB headroom. The 4 GPUs sit idle during load
-#   and during the data-free RTN sweep, then `dispatch_model(model)`
-#   redistributes the much-smaller W4A16 weights (~155 GB total, ~40 GB
-#   per card) onto them right before the sample generation.
-#
-# Tradeoff: oneshot runs RTN on CPU. For 36,382 Linear modules this is
-# memory-bandwidth-bound, expect roughly 30-90 minutes total on a modern
-# multi-socket Xeon/EPYC. Acceptable for a one-shot quantization run.
 print(f"Loading model: {MODEL_ID}  (device_map=cpu)")
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
