@@ -34,8 +34,9 @@ Disk space note  : Saved W4A16 output is ~155 GB (310B params * 0.5 byte/param
 """
 import argparse
 
+import torch
 from compressed_tensors.offload import dispatch_model
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import QuantizationModifier
@@ -61,23 +62,57 @@ args = parser.parse_args()
 # =========================
 MODEL_ID = args.model_path
 
-# `dtype="auto"` honors the source FP8 quantization_config and produces
-# `CompressedLinear` modules (subclass of nn.Linear), which the
-# QuantizationModifier targets="Linear" rule still matches. The FP8 weights
-# are dequantized on-the-fly by compressed_tensors when llm-compressor reads
-# them for re-quantization.
+# MiMo-V2.5 is shipped pre-quantized in FP8 (E4M3, block 128x128). Loading
+# with the default FineGrainedFP8 quantizer is BROKEN for this MoE topology:
+# `replace_with_fp8_linear` fuses `model.layers.{N}.mlp.experts` into a single
+# `FP8Experts` module, then later iterations try to traverse `experts.0.*`
+# and crash with `AttributeError: FP8Experts has no attribute '0'`.
+#
+# Official escape hatch (transformers v5.x, src/transformers/integrations/
+# finegrained_fp8.py:732 + utils/quantization_config.py:1671):
+#
+#     FineGrainedFP8Config.dequantize: bool = False
+#
+# When set to True, `replace_with_fp8_linear` early-returns AND the FP8 +
+# weight_scale_inv on-disk tensors are unpacked to BF16 nn.Linear weights
+# via the built-in per-block dequantization (line 889:
+#   dequantized = reshaped * expanded_scales
+# ). This is the same path DeepSeek-V3 users use for FP8 -> BF16 conversion.
 #
 # `trust_remote_code=True` is REQUIRED (mimo_v2 not in CONFIG_MAPPING_NAMES
 # even on transformers 5.6.2 — see HF PR #45144).
+print(f"Loading config from: {MODEL_ID}")
+config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
+
+if getattr(config, "quantization_config", None) is not None:
+    qc = config.quantization_config
+    if isinstance(qc, dict):
+        qc["dequantize"] = True
+        qmethod = qc.get("quant_method", "?")
+    else:
+        qc.dequantize = True
+        qmethod = getattr(qc, "quant_method", "?")
+    print(f"  Source quant_method='{qmethod}', set dequantize=True "
+          f"(weights will be unpacked to BF16 on load).")
+else:
+    print("  No source quantization_config — loading directly in dtype=bfloat16.")
+
+# NOTE: After dequantization the model holds ~620 GB of BF16 weights
+# (310B params * 2 bytes). Make sure the host has enough CPU+GPU RAM via
+# device_map="auto", or pass an explicit max-memory dict if you need to
+# offload to disk.
+print(f"Loading model: {MODEL_ID}")
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
-    dtype="auto",
+    config=config,
+    dtype=torch.bfloat16,
     trust_remote_code=True,
     low_cpu_mem_usage=True,
+    device_map="auto",
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-print(f"Loaded model: {MODEL_ID}")
 print(f"Model class : {type(model).__name__}")
+print(f"# params    : {sum(p.numel() for p in model.parameters()):,}")
 
 # =========================
 # Quantization recipe — MiMo-V2.5 W4A16 RTN
