@@ -36,13 +36,42 @@ Disk space note  : Saved W4A16 output is ~155 GB (310B params * 0.5 byte/param
                    intermediate is materialized to disk.
 """
 import argparse
+import os
 
-import torch
-from compressed_tensors.offload import dispatch_model
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+# --- CPU-ONLY GUARD --------------------------------------------------------
+# MUST run BEFORE `import torch` so PyTorch never initializes a CUDA context.
+#
+# Why: with the BF16 model resident in CPU RAM (~620 GB on a 768 GB box,
+# leaving ~148 GB headroom), llm-compressor's IndependentPipeline calls
+# accelerate's dispatch_model(model). accelerate then *partially* moves
+# weights to the 4x RTX 6000 Pro GPUs and sets up CPU<->GPU offload hooks.
+# That redistribution transiently doubles some weight buffers and pushes
+# total RSS over 768 GB, getting the process SIGKILL'd by the OS OOM-killer
+# (silent death — no traceback, just a bare shell prompt).
+#
+# RTN W4A16 calibration is a per-tensor weight-only operation; it does NOT
+# benefit from GPU. Forcing CUDA off makes dispatch_model a no-op and keeps
+# every tensor on CPU for the duration of oneshot(). Total runtime overhead
+# is small (calibrate ~1-2 min, compress ~1 min on this hardware).
+#
+# Override at the shell if you need to re-enable CUDA for debugging:
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 python3 mimo2-5-W4A16_PTQ.py ...
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+os.environ.setdefault("ACCELERATE_USE_CPU", "true")
 
-from llmcompressor import oneshot
-from llmcompressor.modifiers.quantization import QuantizationModifier
+import torch  # noqa: E402  (must come AFTER the CUDA guard above)
+from compressed_tensors.offload import dispatch_model  # noqa: E402
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer  # noqa: E402
+
+from llmcompressor import oneshot  # noqa: E402
+from llmcompressor.modifiers.quantization import QuantizationModifier  # noqa: E402
+
+assert not torch.cuda.is_available(), (
+    "CUDA is still visible to torch. The CPU-only guard at the top of this "
+    "script must run before any torch.cuda call. If you set CUDA_VISIBLE_DEVICES "
+    "in the shell, make sure it is empty (CUDA_VISIBLE_DEVICES=)."
+)
+print("[cpu-only] torch.cuda.is_available()=False  (intentional, see header).")
 
 
 # =========================
@@ -77,9 +106,14 @@ MODEL_ID = args.model_path
 #   buffers during oneshot ≈ 670 GB peak CPU RAM. Fits in 768 GB with
 #   ~100 GB headroom.
 #
-# Device map is CPU. The 4 GPUs are not used during load or during the
-# RTN sweep (all CPU). `dispatch_model(model)` after oneshot redistributes
-# the much-smaller W4A16 weights (~155 GB, ~40 GB/card) for sample-gen.
+# Device map is CPU AND CUDA is hidden from this process (see the CPU-ONLY
+# GUARD at the top of the script). Without that guard, llm-compressor's
+# pipeline calls accelerate.dispatch_model() which silently OOM-kills the
+# whole process while trying to redistribute the BF16 weights across the
+# 4 GPUs + CPU offload — hence the bare-shell-prompt "crash" with no
+# traceback. After oneshot the W4A16 model in memory is only ~155 GB
+# and could be re-dispatched to GPUs if you want sample generation, but
+# that is not needed for save_pretrained().
 #
 # `trust_remote_code=True` remains REQUIRED (mimo_v2 not in
 # CONFIG_MAPPING_NAMES even on transformers 5.6.2 — HF PR #45144).
