@@ -48,7 +48,11 @@ class TritonDiffKVSinksBackend(FlashAttentionDiffKVBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TRITON_DIFFKV_SINKS"
+        # Masquerade as FLASH_ATTN_DIFFKV so vLLM's closed
+        # AttentionBackendEnum lookup succeeds. The actual class used
+        # is still TritonDiffKVSinksBackend (set in MiMo's init);
+        # this name is only a metadata tag.
+        return "FLASH_ATTN_DIFFKV"
 
     @staticmethod
     def get_impl_cls() -> type["TritonDiffKVSinksImpl"]:
@@ -66,11 +70,25 @@ class TritonDiffKVSinksImpl(FlashAttentionDiffKVImpl):
     """
 
     def __init__(self, *args, **kwargs) -> None:
-        # Skip FlashAttentionDiffKVImpl.__init__ (which probes FA version);
-        # call the grandparent FlashAttentionImpl directly.
-        super(FlashAttentionDiffKVImpl, self).__init__(*args, **kwargs)
-        # Sentinel so any code that introspects this attribute does not
-        # trip over None checks.
+        # Skip FlashAttentionDiffKVImpl.__init__ (which probes FA version)
+        # and call the grandparent FlashAttentionImpl directly.
+        #
+        # FlashAttentionImpl.__init__ unconditionally asserts
+        #     flash_attn_supports_sinks()
+        # whenever sinks are present. On sm_120 that returns False, so we
+        # monkey-patch it for the duration of the super() call only.
+        # This never escapes our constructor.
+        from vllm.v1.attention.backends import flash_attn as _fa_mod
+
+        _orig_supports = _fa_mod.flash_attn_supports_sinks
+        _fa_mod.flash_attn_supports_sinks = lambda: True
+        try:
+            super(FlashAttentionDiffKVImpl, self).__init__(*args, **kwargs)
+        finally:
+            _fa_mod.flash_attn_supports_sinks = _orig_supports
+
+        # Sentinel: we never dispatch via FA version, our forward() goes
+        # straight to the Triton kernel.
         self.vllm_flash_attn_version = -1
 
     def forward(
