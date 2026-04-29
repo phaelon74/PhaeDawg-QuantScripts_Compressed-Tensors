@@ -1,0 +1,30 @@
+--- a/vllm/model_executor/models/mimo_v2.py
++++ b/vllm/model_executor/models/mimo_v2.py
+@@ -297,9 +297,21 @@
+         # Use DiffKV backend when V has a different head dim than K
+         if self.v_head_dim != self.head_dim:
+-            FlashAttentionDiffKVBackend.set_head_size_v(self.v_head_dim)
+-            attn_backend = FlashAttentionDiffKVBackend
+-            logger.info_once("Using FlashAttentionDiffKVBackend for attention.")
++            # Pick the backend that actually has a working sinks-aware path
++            # on this hardware. FlashAttentionDiffKVBackend depends on FA3,
++            # which requires Hopper (sm_90); on Blackwell consumer
++            # (sm_120) and other non-Hopper archs FA3 is unavailable.
++            if current_platform.get_device_capability().major >= 12:
++                from vllm.v1.attention.backends.triton_diffkv_sinks import (  # noqa: E501
++                    TritonDiffKVSinksBackend,
++                )
++                TritonDiffKVSinksBackend.set_head_size_v(self.v_head_dim)
++                attn_backend = TritonDiffKVSinksBackend
++                logger.info_once(
++                    "Using TritonDiffKVSinksBackend for attention "
++                    "(sm_120+, no FA3)."
++                )
++            else:
++                FlashAttentionDiffKVBackend.set_head_size_v(self.v_head_dim)
++                attn_backend = FlashAttentionDiffKVBackend
++                logger.info_once(
++                    "Using FlashAttentionDiffKVBackend for attention."
++                )
+         else:
+             attn_backend = None
