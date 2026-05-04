@@ -46,8 +46,13 @@ set -euo pipefail
 # first argument, or set VLLM_API_KEY in the environment.
 #
 # GPU selection:
-#   - Physical nvidia-smi GPUs 5,6 are exposed to the process.
+#   - Physical nvidia-smi GPUs 0,5 are exposed to the process (the two
+#     idle 3090s on this 6-GPU host; GPUs 1-4 are reserved for behemoth).
 #   - Inside vLLM they appear as logical CUDA devices 0,1.
+#   - PCI topology: 0 is at 01:00.0 and 5 is at 49:00.0 -- opposite ends
+#     of the PCIe layout, so NCCL P2P will go via PHB (CPU root complex).
+#     If you see NCCL hangs or sluggish all-reduce, uncomment the NCCL
+#     overrides below.
 #
 # vLLM REQUIREMENTS:
 #   - Gemma 4 support is recent. You need a vLLM build that registers the
@@ -67,7 +72,7 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 # --- GPU Selection ---
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=5,6
+export CUDA_VISIBLE_DEVICES=0,5
 
 # --- vLLM / CUDA behavior ---
 export VLLM_NO_USAGE_STATS=1
@@ -126,13 +131,22 @@ TP_SIZE="${TP_SIZE:-2}"
 #     32K ctx -> ~320 MiB / GPU / sequence
 #     64K ctx -> ~640 MiB / GPU / sequence
 #
-# Defaults below: 16K x 2 seqs => ~1.1 GiB/GPU KV; ~18 GiB weights;
-# leaves ~5 GiB/GPU for vision encoder workspace + activations + CUDA
-# graphs + MM profiling reservation.
+# Empirical capacity from this exact host (gpu_mem_util=0.92, full VLM):
+#   vLLM reports: "GPU KV cache size: 9,584 tokens" + "Max concurrency
+#   for 16,384 tokens per request: 1.70x" -> total KV budget ~27,852 tokens.
 #
-# vLLM's official 2x80GB recipe uses 32768. We cannot match that on 24GB.
+# Default below: 24K context => ~27K/24K = 1.13x concurrency. Bump higher
+# if you want more single-stream context, with these escape valves:
+#   MAX_MODEL_LEN=27648 ........ ~1.0x concurrency (single-stream max)
+#   KV_CACHE_DTYPE=fp8 ......... roughly doubles KV budget (~55K total)
+#   TEXT_ONLY=1 ................ frees vision profiling (~1-2 GiB more)
+#   GPU_MEMORY_UTILIZATION=0.94  squeezes another ~1 GiB
+# Stacking fp8 + TEXT_ONLY can realistically push MAX_MODEL_LEN to ~96K.
+#
+# vLLM's official 2x80GB recipe uses 32768; we now beat that for single-
+# stream length thanks to the W8A16 quant + the 5:1 SWA pattern.
 # ------------------------------------------------------------
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-24576}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.92}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"

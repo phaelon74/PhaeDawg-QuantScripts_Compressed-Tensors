@@ -40,8 +40,13 @@ set -euo pipefail
 # first argument, or set VLLM_API_KEY in the environment.
 #
 # GPU selection:
-#   - Physical nvidia-smi GPUs 5,6 are exposed to the process.
+#   - Physical nvidia-smi GPUs 0,5 are exposed to the process (the two
+#     idle 3090s on this 6-GPU host; GPUs 1-4 are reserved for behemoth).
 #   - Inside vLLM they appear as logical CUDA devices 0,1.
+#   - PCI topology: 0 is at 01:00.0 and 5 is at 49:00.0 -- opposite ends
+#     of the PCIe layout, so NCCL P2P will go via PHB (CPU root complex).
+#     If you see NCCL hangs or sluggish all-reduce, uncomment the NCCL
+#     overrides below.
 # ============================================================
 
 # --- Memory Management ---
@@ -49,7 +54,7 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 # --- GPU Selection ---
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=5,6
+export CUDA_VISIBLE_DEVICES=0,5
 
 # --- vLLM / CUDA behavior ---
 export VLLM_NO_USAGE_STATS=1
