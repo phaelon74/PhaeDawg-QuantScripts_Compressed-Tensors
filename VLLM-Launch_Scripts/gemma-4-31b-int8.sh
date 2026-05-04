@@ -146,7 +146,7 @@ TP_SIZE="${TP_SIZE:-2}"
 # vLLM's official 2x80GB recipe uses 32768; we now beat that for single-
 # stream length thanks to the W8A16 quant + the 5:1 SWA pattern.
 # ------------------------------------------------------------
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-24576}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.95}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
