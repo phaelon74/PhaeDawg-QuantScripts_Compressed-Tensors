@@ -188,30 +188,61 @@ DEFAULT_THINKING="${DEFAULT_THINKING:-1}"
 ENABLE_TOOL_CALLING="${ENABLE_TOOL_CALLING:-1}"
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-gemma4}"
 
-# REQUIRED: The TheHouseOfTheDude W8A16 quant DOES NOT ship chat_template.jinja
-# (the PTQ pipeline stripped it). As of transformers v4.44, vLLM refuses to
-# auto-pick a default template, so without this you get:
-#   vllm.entrypoints.chat_utils.ChatTemplateResolutionError: ... you must
-#   provide a chat template if the tokenizer does not define one.
+# Chat template resolution.
 #
-# Use vLLM's official Gemma 4 template -- it handles plain chat AND the
-# <|think|> reasoning delimiters AND the <|tool_call> tool protocol.
-# One-time setup:
+# vLLM needs an explicit chat template when the tokenizer doesn't declare one
+# (otherwise: vllm.entrypoints.chat_utils.ChatTemplateResolutionError).
+#
+# Resolution order (first match wins):
+#   1. CHAT_TEMPLATE env var, if explicitly set by the caller (manual override).
+#   2. $MODEL_DIR/chat_template.jinja, if the quant ships one alongside the
+#      weights. This is the preferred source -- it is the exact template
+#      processor.save_pretrained() wrote during PTQ and is guaranteed to
+#      match the tokenizer's special-token ids (e.g. <turn|>=106).
+#   3. /home/phaedawg/chat_templates/tool_chat_template_gemma4.jinja
+#      (vLLM's upstream Gemma 4 template) as a fallback for older quants
+#      that did NOT ship chat_template.jinja.
+#
+# Older PTQ runs of TheHouseOfTheDude/gemma-4-31B_PTQ shipped without
+# chat_template.jinja (the pipeline stripped it). Newer runs preserve it.
+# This block makes the script DTRT in both cases without manual intervention.
+#
+# To force the home-dir fallback, set CHAT_TEMPLATE explicitly:
+#   CHAT_TEMPLATE=/home/phaedawg/chat_templates/tool_chat_template_gemma4.jinja \
+#     ./gemma-4-31b-int8.sh API_KEY
+# To bypass --chat-template entirely, set CHAT_TEMPLATE=''.
+#
+# One-time setup for the fallback template:
 #   mkdir -p /home/phaedawg/chat_templates
 #   wget -O /home/phaedawg/chat_templates/tool_chat_template_gemma4.jinja \
 #     https://raw.githubusercontent.com/vllm-project/vllm/main/examples/tool_chat_template_gemma4.jinja
-CHAT_TEMPLATE="${CHAT_TEMPLATE:-/home/phaedawg/chat_templates/tool_chat_template_gemma4.jinja}"
+FALLBACK_CHAT_TEMPLATE="/home/phaedawg/chat_templates/tool_chat_template_gemma4.jinja"
+MODEL_BUNDLED_CHAT_TEMPLATE="$MODEL_DIR/chat_template.jinja"
+
+if [[ -z "${CHAT_TEMPLATE+x}" ]]; then
+  if [[ -f "$MODEL_BUNDLED_CHAT_TEMPLATE" ]]; then
+    CHAT_TEMPLATE="$MODEL_BUNDLED_CHAT_TEMPLATE"
+    echo "CHAT_TEMPLATE: using model-bundled template at $CHAT_TEMPLATE"
+  else
+    CHAT_TEMPLATE="$FALLBACK_CHAT_TEMPLATE"
+    echo "CHAT_TEMPLATE: model dir has no chat_template.jinja, falling back to $CHAT_TEMPLATE"
+  fi
+else
+  echo "CHAT_TEMPLATE: caller-provided override = ${CHAT_TEMPLATE:-<empty / disabled>}"
+fi
 
 # Fail fast with a useful message if the chat template doesn't exist on disk,
 # so you don't get the cryptic ChatTemplateResolutionError 30 seconds into
 # model load.
 if [[ -n "$CHAT_TEMPLATE" && ! -f "$CHAT_TEMPLATE" ]]; then
   echo "ERROR: CHAT_TEMPLATE points to a file that does not exist: $CHAT_TEMPLATE" >&2
-  echo "       Download it with:" >&2
-  echo "         mkdir -p $(dirname "$CHAT_TEMPLATE")" >&2
-  echo "         wget -O $CHAT_TEMPLATE \\" >&2
-  echo "           https://raw.githubusercontent.com/vllm-project/vllm/main/examples/tool_chat_template_gemma4.jinja" >&2
-  echo "       Or set CHAT_TEMPLATE='' to attempt launch without one (vLLM will refuse on the first /v1/chat/completions request)." >&2
+  echo "       Either:" >&2
+  echo "         (a) re-run the PTQ script so the model ships chat_template.jinja, or" >&2
+  echo "         (b) download the upstream fallback:" >&2
+  echo "             mkdir -p $(dirname "$FALLBACK_CHAT_TEMPLATE")" >&2
+  echo "             wget -O $FALLBACK_CHAT_TEMPLATE \\" >&2
+  echo "               https://raw.githubusercontent.com/vllm-project/vllm/main/examples/tool_chat_template_gemma4.jinja" >&2
+  echo "         (c) set CHAT_TEMPLATE='' to attempt launch without one (vLLM will refuse on the first /v1/chat/completions request)." >&2
   exit 3
 fi
 
