@@ -283,10 +283,15 @@ fi
 
 # Multimodal config. TEXT_ONLY=1 forces image=0,audio=0 which lets vLLM skip
 # the vision encoder profiling pass entirely.
+#
+# NOTE: Current vLLM (per `vllm serve --help`) requires --limit-mm-per-prompt
+# as JSON, NOT the legacy `image=N,audio=M` shorthand the older Gemma 4
+# recipe shows. Older shorthand fails with:
+#   argument --limit-mm-per-prompt: Value image=... cannot be converted to <function loads ...>
 if [[ "$TEXT_ONLY" == "1" ]]; then
-  VLLM_ARGS+=(--limit-mm-per-prompt "image=0,audio=0")
+  VLLM_ARGS+=(--limit-mm-per-prompt '{"image": 0, "audio": 0}')
 else
-  VLLM_ARGS+=(--limit-mm-per-prompt "image=${LIMIT_MM_IMAGE},audio=${LIMIT_MM_AUDIO}")
+  VLLM_ARGS+=(--limit-mm-per-prompt "{\"image\": ${LIMIT_MM_IMAGE}, \"audio\": ${LIMIT_MM_AUDIO}}")
   if [[ -n "$VISION_TOKEN_BUDGET" ]]; then
     VLLM_ARGS+=(--mm-processor-kwargs "{\"max_soft_tokens\": ${VISION_TOKEN_BUDGET}}")
   fi
