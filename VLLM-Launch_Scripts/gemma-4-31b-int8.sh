@@ -188,16 +188,32 @@ DEFAULT_THINKING="${DEFAULT_THINKING:-1}"
 ENABLE_TOOL_CALLING="${ENABLE_TOOL_CALLING:-1}"
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-gemma4}"
 
-# IMPORTANT: For *multi-turn* tool calling and best reasoning behavior, the
-# Gemma 4 vLLM recipe requires a custom Jinja chat template:
-#   examples/tool_chat_template_gemma4.jinja
-# This is shipped inside the official vllm/vllm-openai container. If you
-# launched from a pip install, download it from:
-#   https://github.com/vllm-project/vllm/blob/main/examples/tool_chat_template_gemma4.jinja
-# and point CHAT_TEMPLATE at the local file. If left empty, vLLM will use
-# the model's default chat template, which works for single-turn but may
-# misbehave on multi-turn tool conversations.
-CHAT_TEMPLATE="${CHAT_TEMPLATE:-}"
+# REQUIRED: The TheHouseOfTheDude W8A16 quant DOES NOT ship chat_template.jinja
+# (the PTQ pipeline stripped it). As of transformers v4.44, vLLM refuses to
+# auto-pick a default template, so without this you get:
+#   vllm.entrypoints.chat_utils.ChatTemplateResolutionError: ... you must
+#   provide a chat template if the tokenizer does not define one.
+#
+# Use vLLM's official Gemma 4 template -- it handles plain chat AND the
+# <|think|> reasoning delimiters AND the <|tool_call> tool protocol.
+# One-time setup:
+#   mkdir -p /home/phaedawg/chat_templates
+#   wget -O /home/phaedawg/chat_templates/tool_chat_template_gemma4.jinja \
+#     https://raw.githubusercontent.com/vllm-project/vllm/main/examples/tool_chat_template_gemma4.jinja
+CHAT_TEMPLATE="${CHAT_TEMPLATE:-/home/phaedawg/chat_templates/tool_chat_template_gemma4.jinja}"
+
+# Fail fast with a useful message if the chat template doesn't exist on disk,
+# so you don't get the cryptic ChatTemplateResolutionError 30 seconds into
+# model load.
+if [[ -n "$CHAT_TEMPLATE" && ! -f "$CHAT_TEMPLATE" ]]; then
+  echo "ERROR: CHAT_TEMPLATE points to a file that does not exist: $CHAT_TEMPLATE" >&2
+  echo "       Download it with:" >&2
+  echo "         mkdir -p $(dirname "$CHAT_TEMPLATE")" >&2
+  echo "         wget -O $CHAT_TEMPLATE \\" >&2
+  echo "           https://raw.githubusercontent.com/vllm-project/vllm/main/examples/tool_chat_template_gemma4.jinja" >&2
+  echo "       Or set CHAT_TEMPLATE='' to attempt launch without one (vLLM will refuse on the first /v1/chat/completions request)." >&2
+  exit 3
+fi
 
 # Multimodal limits. Gemma 4 31B is text + image (no audio on this size).
 # Set IMAGE limit / AUDIO limit per request. Set TEXT_ONLY=1 to skip
