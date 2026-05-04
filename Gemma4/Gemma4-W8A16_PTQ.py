@@ -16,10 +16,12 @@ Gemma 4 W8A16 PTQ (Post-Training Quantization)
   Note: Gemma 4 requires transformers >= 4.52 (or install from source).
 """
 import argparse
+import os
+import shutil
 
 import torch.nn as nn
 from compressed_tensors.offload import dispatch_model
-from transformers import Gemma4ForConditionalGeneration, AutoProcessor
+from transformers import Gemma4ForConditionalGeneration, AutoProcessor, GenerationConfig
 
 # Transformers v5 compatibility
 import transformers.modeling_utils as _tmu
@@ -73,6 +75,39 @@ model = Gemma4ForConditionalGeneration.from_pretrained(
 # processing) rather than a plain AutoTokenizer.
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
 print(f"Loaded model: {MODEL_ID}")
+
+# ----------------------------------------------------------------------
+# Snapshot the source GenerationConfig BEFORE quantization / save.
+#
+# Why: Gemma 4's source generation_config.json declares a LIST of stop ids
+# (e.g. "eos_token_id": [1, 106, 50] -- <eos>, <turn|>, <channel|>).
+# transformers v5 + llmcompressor's oneshot / save_pretrained path tends to
+# coerce list-valued eos_token_id down to a scalar (and may re-derive it
+# from config.json, which only carries a single int). The result is that
+# the saved checkpoint stops on <eos> only -- vLLM never breaks on
+# <turn|> (id 106), so chat completions run on after the assistant turn
+# ends, producing the classic "answer then keep talking forever"
+# malfunction (Paris in 30 languages, etc.).
+#
+# We capture the on-disk JSON now, restore it onto model.generation_config
+# right before save, AND byte-copy the source file over the saved one
+# after save_pretrained, so the disk artifact is guaranteed correct
+# regardless of what transformers/llmcompressor decide to write.
+# ----------------------------------------------------------------------
+SRC_GEN_CONFIG_PATH = os.path.join(MODEL_ID, "generation_config.json")
+try:
+    source_generation_config = GenerationConfig.from_pretrained(
+        MODEL_ID, trust_remote_code=True
+    )
+    print(
+        f"Captured source GenerationConfig: "
+        f"eos_token_id={source_generation_config.eos_token_id}, "
+        f"bos_token_id={source_generation_config.bos_token_id}, "
+        f"pad_token_id={source_generation_config.pad_token_id}"
+    )
+except Exception as e:
+    source_generation_config = None
+    print(f"WARNING: could not load source GenerationConfig from {MODEL_ID}: {e}")
 
 # =========================
 # Quantization recipe
@@ -137,8 +172,36 @@ print("==========================================\n\n")
 # Save compressed model
 # =========================
 SAVE_DIR = args.output_path
+
+# Restore the pristine source GenerationConfig onto the model so
+# save_pretrained serializes the multi-stop eos_token_id list correctly.
+if source_generation_config is not None:
+    model.generation_config = source_generation_config
+    print(
+        f"Restored model.generation_config.eos_token_id = "
+        f"{model.generation_config.eos_token_id} prior to save."
+    )
+
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 processor.save_pretrained(SAVE_DIR)
+
+# Belt-and-suspenders: byte-copy the source generation_config.json over the
+# saved one. This guarantees the on-disk file matches the source exactly,
+# even if transformers/llmcompressor coerced the in-memory GenerationConfig
+# during save (e.g. dropping list-valued eos_token_id back to scalar).
+dst_gen_config_path = os.path.join(SAVE_DIR, "generation_config.json")
+if os.path.isfile(SRC_GEN_CONFIG_PATH):
+    shutil.copy2(SRC_GEN_CONFIG_PATH, dst_gen_config_path)
+    print(
+        f"Copied source generation_config.json -> {dst_gen_config_path} "
+        f"(preserves multi-stop eos_token_id)."
+    )
+else:
+    print(
+        f"WARNING: source generation_config.json not found at "
+        f"{SRC_GEN_CONFIG_PATH}; saved file may be missing required stop ids "
+        f"(e.g. 106=<turn|>, 50=<channel|>). Verify manually."
+    )
 
 print("\n=== Complete ===")
 print("Saved to:", SAVE_DIR)
