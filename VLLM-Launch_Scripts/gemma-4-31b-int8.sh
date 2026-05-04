@@ -107,7 +107,7 @@ fi
 # Local W8A16 compressed-tensors checkpoint (W8A16 branch of the repo).
 # Override at launch time if needed:
 #   MODEL_DIR=/path/to/model ./gemma-4-31b-int8.sh
-MODEL_DIR="${MODEL_DIR:-/media/fmodels/TheHouseOfTheDude/gemma-4-31B_PTQ/W8A16}"
+MODEL_DIR="${MODEL_DIR:-/media/fmodels/TheHouseOfTheDude/gemma-4-31B_PTQ}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-gemma-4-31B-INT8-W8A16}"
 # The compressed-tensors checkpoint includes tokenizer.json/tokenizer_config.json
 # and processor_config.json (multimodal). Keep tokenizer resolution local.
