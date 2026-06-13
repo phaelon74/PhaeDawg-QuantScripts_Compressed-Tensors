@@ -6,9 +6,11 @@ Qwen3.6 W8A16 PTQ (Post-Training Quantization)
   - No calibration dataset needed
   - W8A16 preset: INT8 per-channel symmetric weights, FP16/BF16 activations
   - Post-save key remap to fix Transformers v5 double-nested weight paths
+  - Post-save copy of mtp.* weights from source (Transformers never loads them)
 """
 import argparse
 import glob
+import json
 import os
 
 import torch.nn as nn
@@ -109,6 +111,57 @@ def fix_saved_weight_keys(save_dir):
     print()
 
 
+def _is_mtp_key(key: str) -> bool:
+    return key.startswith("mtp.")
+
+
+def copy_mtp_weights_from_source(source_dir: str, save_dir: str) -> None:
+    """Copy top-level mtp.* tensors from the base checkpoint into the quant output."""
+    index_path = os.path.join(source_dir, "model.safetensors.index.json")
+    mtp_tensors = {}
+
+    if os.path.isfile(index_path):
+        with open(index_path, encoding="utf-8") as f:
+            weight_map = json.load(f)["weight_map"]
+        shard_to_keys = {}
+        for key, shard in weight_map.items():
+            if _is_mtp_key(key):
+                shard_to_keys.setdefault(shard, []).append(key)
+        for shard, keys in sorted(shard_to_keys.items()):
+            shard_path = os.path.join(source_dir, shard)
+            print(f"  Reading {len(keys)} MTP keys from {shard}")
+            with safe_open(shard_path, framework="pt") as f:
+                for key in keys:
+                    mtp_tensors[key] = f.get_tensor(key).clone()
+    else:
+        for fpath in sorted(glob.glob(os.path.join(source_dir, "*.safetensors"))):
+            with safe_open(fpath, framework="pt") as f:
+                for key in f.keys():
+                    if _is_mtp_key(key):
+                        mtp_tensors[key] = f.get_tensor(key).clone()
+
+    if not mtp_tensors:
+        print("WARNING: No mtp.* tensors found in source — MTP will not work in vLLM.")
+        return
+
+    safetensor_files = sorted(glob.glob(os.path.join(save_dir, "*.safetensors")))
+    for fpath in safetensor_files:
+        with safe_open(fpath, framework="pt") as f:
+            metadata = f.metadata() or {}
+            tensors = {key: f.get_tensor(key).clone() for key in f.keys()}
+        tensors.update(mtp_tensors)
+        tmp_path = fpath + ".tmp"
+        save_file(tensors, tmp_path, metadata=metadata)
+        os.replace(tmp_path, fpath)
+
+    with safe_open(safetensor_files[0], framework="pt") as f:
+        mtp_keys = sorted(k for k in f.keys() if _is_mtp_key(k))
+    print(f"Copied {len(mtp_tensors)} MTP tensors; output now has {len(mtp_keys)} mtp.* keys")
+    if "mtp.fc.weight" in mtp_keys:
+        fc = f.get_tensor("mtp.fc.weight")
+        print(f"  mtp.fc.weight: {fc.dtype} {tuple(fc.shape)}")
+
+
 # =========================
 # Parse Command-Line Arguments
 # =========================
@@ -176,6 +229,10 @@ tokenizer.save_pretrained(SAVE_DIR)
 
 # Fix weight keys mangled by transformers v5
 fix_saved_weight_keys(SAVE_DIR)
+
+# Transformers ignores mtp.* on load; save_pretrained never writes them
+print("\n=== Copying MTP weights from source ===")
+copy_mtp_weights_from_source(MODEL_ID, SAVE_DIR)
 
 print("\n=== Complete ===")
 print("Saved to:", SAVE_DIR)

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 # ============================================================
-# Qwen3.6-35B-A3B INT4 on 8x RTX 3060 Ti
+# Qwen3.6-35B-A3B INT8 on 8x RTX 3060 Ti
 # Single-node text-serving defaults for vLLM
 # ============================================================
 
@@ -12,7 +12,7 @@ set -euo pipefail
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # --- GPU Selection ---
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 # --- NCCL (consumer PCIe GPUs, no InfiniBand) ---
 #export NCCL_IB_DISABLE=1
@@ -62,7 +62,7 @@ ALL2ALL_BACKEND="allgather_reducescatter"
 # Qwen recommends 262K natively, but 128K is a safer default on
 # 8x 3060 Ti while still preserving long-context behavior better
 # than the old 64K script.
-MAX_MODEL_LEN=16384
+MAX_MODEL_LEN=262144
 GPU_MEMORY_UTILIZATION=0.94
 MAX_NUM_SEQS=8
 MAX_NUM_BATCHED_TOKENS=8192
