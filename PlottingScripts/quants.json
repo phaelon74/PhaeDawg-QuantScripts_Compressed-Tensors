@@ -70,7 +70,7 @@
       "creator": "TheHouseOfTheDude",
       "type": "FP6",
       "disk_size_gib": 30.2,
-      "mean_kld": 0.026806
+      "mean_kld": 0.023708
     },
     {
       "id": "TheHouseOfTheDude/Qwen3.6-35B-A3B_INT8",
