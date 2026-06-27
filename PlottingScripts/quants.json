@@ -66,11 +66,18 @@
       "mean_kld": 0.00711
     },
     {
-      "id": "TheHouseOfTheDude/Qwen3.6-35B-A3B-FP6",
+      "id": "TheHouseOfTheDude/Qwen3.6-35B-A3B-FP6(W6A6-RunTime)",
       "creator": "TheHouseOfTheDude",
       "type": "FP6",
       "disk_size_gib": 30.2,
       "mean_kld": 0.023708
+    },
+    {
+      "id": "TheHouseOfTheDude/Qwen3.6-35B-A3B-FP6(W6A8-RunTime)",
+      "creator": "TheHouseOfTheDude",
+      "type": "FP6",
+      "disk_size_gib": 30.2,
+      "mean_kld": 0.022765
     },
     {
       "id": "TheHouseOfTheDude/Qwen3.6-35B-A3B_INT8",

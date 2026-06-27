@@ -31,7 +31,9 @@ set -euo pipefail
 #   - Native context: 262,144 tokens (256K).
 #   - Vision encoder: SigLIP-style, 27 layers, 1152 hidden, fixed token budget
 #     (70 / 140 / 280 (default) / 560 / 1120 tokens per image).
-#   - NO MTP / speculative head -> no --speculative-config.
+#   - MTP via external assistant drafter (google/gemma-4-31B-it-assistant).
+#     vLLM's Gemma 4 MTP path wires the 4-layer drafter to share the
+#     target's KV cache. Enabled via --speculative-config.
 #
 # IMPORTANT FIT NOTES for 2x 24 GiB RTX 3090:
 #   - On-disk W8A16 checkpoint: ~36.1 GiB (linear INT8 + BF16 carve-outs).
@@ -260,6 +262,20 @@ LIMIT_MM_AUDIO="${LIMIT_MM_AUDIO:-0}"   # 31B has no audio encoder
 # Lower this to 140 if you want to fit more images per prompt.
 VISION_TOKEN_BUDGET="${VISION_TOKEN_BUDGET:-280}"
 
+# ============================================================
+# MTP (Multi-Token Prediction) speculative decoding
+# ============================================================
+# Uses google/gemma-4-31B-it-assistant (a tiny 4-layer drafter, ~few hundred
+# MB) to propose multiple tokens that the target verifies in one forward pass.
+# The drafter shares the target's KV cache, so extra VRAM cost is minimal.
+# Speedups of 1.5-3x on decode depending on workload.
+#
+# Requires vLLM nightly (post-PR #41745) or v0.22+.
+# Set ENABLE_MTP=0 to disable if it causes issues on your vLLM version.
+ENABLE_MTP="${ENABLE_MTP:-1}"
+MTP_MODEL="${MTP_MODEL:-/media/fmodels/google/gemma-4-31B-it-assistant}"
+NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-4}"
+
 # Prefix caching: large win for chat / agent workloads. Disable only when
 # benchmarking (vLLM Gemma 4 recipe explicitly turns it off for benchmarks).
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"
@@ -366,6 +382,10 @@ if [[ "$ENABLE_ASYNC_SCHEDULING" == "1" ]]; then
   VLLM_ARGS+=(--async-scheduling)
 fi
 
+if [[ "$ENABLE_MTP" == "1" ]]; then
+  VLLM_ARGS+=(--speculative-config "{\"method\":\"mtp\",\"model\":\"${MTP_MODEL}\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS}}")
+fi
+
 if [[ -n "$MAX_CUDAGRAPH_CAPTURE_SIZE" ]]; then
   VLLM_ARGS+=(--max-cudagraph-capture-size "$MAX_CUDAGRAPH_CAPTURE_SIZE")
 fi
@@ -388,6 +408,11 @@ else
   echo "  MM image=${LIMIT_MM_IMAGE} audio=${LIMIT_MM_AUDIO} budget=${VISION_TOKEN_BUDGET}"
 fi
 echo "  PREFIX_CACHING=${ENABLE_PREFIX_CACHING}  ASYNC_SCHEDULING=${ENABLE_ASYNC_SCHEDULING}"
+if [[ "$ENABLE_MTP" == "1" ]]; then
+  echo "  MTP=ON (drafter=${MTP_MODEL}, num_speculative_tokens=${NUM_SPECULATIVE_TOKENS})"
+else
+  echo "  MTP=OFF"
+fi
 echo "  ENFORCE_EAGER=${ENFORCE_EAGER}  COMPILATION_CONFIG=${COMPILATION_CONFIG}"
 echo
 echo "Suggested sampling per Google's Gemma 4 model card:"
