@@ -158,10 +158,10 @@ def copy_mtp_weights_from_source(source_dir: str, save_dir: str) -> None:
 
     with safe_open(safetensor_files[0], framework="pt") as f:
         mtp_keys = sorted(k for k in f.keys() if _is_mtp_key(k))
-    print(f"Copied {len(mtp_tensors)} MTP tensors; output now has {len(mtp_keys)} mtp.* keys")
-    if "mtp.fc.weight" in mtp_keys:
-        fc = f.get_tensor("mtp.fc.weight")
-        print(f"  mtp.fc.weight: {fc.dtype} {tuple(fc.shape)}")
+        print(f"Copied {len(mtp_tensors)} MTP tensors; output now has {len(mtp_keys)} mtp.* keys")
+        if "mtp.fc.weight" in mtp_keys:
+            fc = f.get_tensor("mtp.fc.weight")
+            print(f"  mtp.fc.weight: {fc.dtype} {tuple(fc.shape)}")
 
 
 # =========================
