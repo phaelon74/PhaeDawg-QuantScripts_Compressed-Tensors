@@ -112,7 +112,9 @@ TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-mistral}"
 #   key or fall back to MAX_CUDAGRAPH_CAPTURE_SIZE below.
 CUDAGRAPH_MODE="${CUDAGRAPH_MODE:-full_decode_only}"
 CUDAGRAPH_CAPTURE_SIZES="${CUDAGRAPH_CAPTURE_SIZES:-[1,2,4]}"
-COMPILATION_CONFIG="${COMPILATION_CONFIG:-{\"mode\":3,\"cudagraph_mode\":\"${CUDAGRAPH_MODE}\",\"cudagraph_capture_sizes\":${CUDAGRAPH_CAPTURE_SIZES}}}"
+if [[ -z "${COMPILATION_CONFIG:-}" ]]; then
+  COMPILATION_CONFIG="{\"mode\":3,\"cudagraph_mode\":\"${CUDAGRAPH_MODE}\",\"cudagraph_capture_sizes\":${CUDAGRAPH_CAPTURE_SIZES}}"
+fi
 
 # Fallback for older vLLM versions that do not understand cudagraph_capture_sizes
 # inside --compilation-config. Leave empty unless needed.

@@ -1,0 +1,53 @@
+version: 5
+daemon:
+  log_level: info
+  admin_group: sudo
+  disable_clocks_cleanup: false
+apply_settings_timer: 5
+gpus:
+  '10DE:2204-103C:88D5-0000:01:00.0':
+    fan_control_enabled: true
+    fan_control_settings:
+      mode: curve
+      static_speed: 0.5
+      temperature_key: edge
+      interval_ms: 500
+      curve:
+        40: 0.30
+        50: 0.40
+        60: 0.55
+        70: 0.70
+        80: 0.90
+      spindown_delay_ms: 3000
+      change_threshold: 2
+      auto_threshold: 40
+    power_cap: 270.0
+    min_core_clock: 210
+    max_core_clock: 1500
+    gpu_clock_offsets:
+      0: 100
+    mem_clock_offsets:
+      0: 1000
+  '10DE:2204-196E:136A-0000:46:00.0':
+    fan_control_enabled: true
+    fan_control_settings:
+      mode: curve
+      static_speed: 0.5
+      temperature_key: edge
+      interval_ms: 500
+      curve:
+        40: 0.30
+        50: 0.40
+        60: 0.55
+        70: 0.70
+        80: 0.90
+      spindown_delay_ms: 3000
+      change_threshold: 2
+      auto_threshold: 40
+    power_cap: 270.0
+    min_core_clock: 210
+    max_core_clock: 1500
+    gpu_clock_offsets:
+      0: 100
+    mem_clock_offsets:
+      0: 1000

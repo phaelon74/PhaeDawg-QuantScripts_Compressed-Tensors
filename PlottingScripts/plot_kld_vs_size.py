@@ -2,9 +2,35 @@
 """
 Scatter plot: mean KL divergence vs. on-disk model size.
 
-Reads quant definitions from JSON (see quants.json). Marker shape is determined
-by quant *type*; color by *creator*. Legend (upper right) lists each quant with
-its mean KLD, sorted best-to-worst (lowest KLD at top); the plot shows only markers.
+Usage
+-----
+From the PlottingScripts directory (or pass full paths):
+
+    python plot_kld_vs_size.py
+    python plot_kld_vs_size.py --show
+    python plot_kld_vs_size.py -o kld_vs_size.png
+    python plot_kld_vs_size.py --data quants.json -o kld_vs_size.png --show
+
+Arguments
+---------
+--data PATH
+    JSON file with quant definitions (default: quants.json next to this script).
+    Expected top-level keys: ``title``, ``subtitle``, and ``quants`` (a list of
+    objects with ``id``, ``creator``, ``type``, ``disk_size_gib``, ``mean_kld``).
+
+-o, --output PATH
+    Save the plot as a PNG at PATH. If omitted, no file is written unless you
+    use ``--show``.
+
+--show
+    Open an interactive matplotlib window. Without ``--output`` or ``--show``,
+    the script loads data and exits without displaying or saving a plot.
+
+Plot behavior
+-------------
+Marker shape is determined by quant *type*; color by *creator*. The legend
+(upper right) lists each quant with its mean KLD, sorted worst-to-best (highest
+KLD at top, lowest at bottom); the plot shows only markers.
 """
 
 from __future__ import annotations
@@ -125,7 +151,7 @@ def plot_from_payload(
     ax.set_ylim(max(0.0, min(ys) - y_pad), max(ys) + y_pad)
 
     legend_handles: list[Line2D] = []
-    for q in sorted(quants, key=lambda q: float(q["mean_kld"])):
+    for q in sorted(quants, key=lambda q: float(q["mean_kld"]), reverse=True):
         creator = str(q["creator"])
         qtype = str(q["type"])
         qid = str(q.get("id", f'{creator}/{q.get("model", "")}'))

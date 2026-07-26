@@ -3,55 +3,55 @@
 set -euo pipefail
 
 # ============================================================
-# TheHouseOfTheDude/Cydonia-24B-v4.3 (FP6) on 1x RTX PRO 6000 (Blackwell) via vLLM
+# TheDrummer/Behemoth-R1-123B-v2 (B12X FP6 W6A6) on 2x RTX 6000 Pro
+# Workstation (Blackwell, SM120) via vLLM
 # ============================================================
 #
 # Model:
-#   - Base:    TheDrummer/Cydonia-24B-v4.3 (Mistral-Small-3.x 24B finetune,
-#              arch: MistralForCausalLM — plain dense decoder, TEXT-ONLY).
-#   - Quant:   B12X MX-FP6, W6A6 (6-bit weights, 6-bit activations).
-#              quantization_config = {"quant_method":"modelopt","quant_algo":"W6A6"}
-#              Golden-rule Linear coverage: MLP + attention projections (280
-#              linears / 40 layers). Kept BF16: lm_head, embeddings, norms.
-#              Served by the B12X *static* fused kernel (not the micro kernel).
+#   - Base:    TheDrummer/Behemoth-R1-123B-v2 (Mistral-Large-Instruct-2411
+#              fine-tune, arch: MistralForCausalLM, 88 layers, 123B params).
+#   - Quant:   B12X MX-FP6 (W6A6): 6-bit weights (e2m3), activations to FP8
+#              E4M3 at runtime. quantization_config.quant_method=modelopt,
+#              quant_algo=W6A6, producer schema b12x_fp6_safetensors_v1.
+#              Kept BF16: lm_head, embeddings, per-layer norms.
+#              On-disk checkpoint ~= 91 GiB.
 #
-# Architecture notes (from config.json):
-#   - 40 uniform decoder layers (full attention; no GDN/SSM, no MTP, no vision).
-#   - Attention: 32 Q heads, 8 KV heads, head_dim=128.
-#   - hidden=5120, intermediate=32768, vocab=131072.
-#   - Native ctx: 131,072 tokens.
+# ------------------------------------------------------------
+# PREREQUISITE -- SparkInfer / B12X FP6 plugin in vLLM
+# ------------------------------------------------------------
+#   Native vLLM ModelOpt does not implement W6A6. Install the sparkinfer
+#   (b12x) package in the serving venv; its vllm.general_plugins entry point
+#   registers the FP6 quant method in every vLLM process (front, engine-core,
+#   TP workers).
 #
-# This is the model-agnosticism check for the B12X FP6 path: a plain
-# transformer with none of the Qwen3.6 specials (no linear_attn fusions, no
-# draft model). Expect every mlp/attn linear to bind FP6 at startup
-# ("B12X FP6: bound FP6 linear ..."), lm_head/embeds to log BF16 fallback,
-# and NO small-N GEMV bindings (no small bf16 projections in this arch).
+#   No manual FP6 enable flag or --quantization override is needed: the plugin
+#   claims any checkpoint whose config.json carries quant_method=modelopt +
+#   quant_algo=W6A6 (this build also tags producer schema b12x_fp6_safetensors_v1).
+#   Leave QUANTIZATION="" below and vLLM auto-detects from config.json.
 #
-# NOTE on throughput comparisons: no MTP here -> one token per step. Do not
-# compare tok/s against the Qwen3.6 numbers (those carry a ~2.4x
-# tokens-per-step multiplier from speculative decoding).
-#
-# VRAM fit on 1x 96 GiB Blackwell:
-#   - FP6 weights ~= 19 GiB resident (export wrote ~20 GB total).
-#   - KV cache (BF16, TP=1): per-token KV = 40 layers * 2 (K+V) * 8 KV heads
-#     * 128 = 160 KiB/token -> 128K ctx = ~20 GiB per sequence. The default
-#     gpu-memory-utilization leaves room for ~3 concurrent 128K sequences;
-#     drop MAX_MODEL_LEN or KV_CACHE_DTYPE=fp8 for more concurrency.
+# VRAM fit on 2x 96 GiB Blackwell (TP=2, PCIe only):
+#   - FP6 weights resident ~= 91 GiB total -> ~46 GiB / GPU after TP shard.
+#   - KV cache (BF16, 88 layers, 8 KV heads, head_dim=128):
+#       per-token KV ~= 352 KiB/token total -> ~22 GiB / GPU at 128K ctx, 1 seq.
+#   - Default below (64K ctx, 2 seqs) leaves comfortable headroom for graphs.
 #
 # This script does not store API keys. Pass the key as the first argument, or
 # set VLLM_API_KEY in the environment.
+#
+# GPU selection:
+#   - Both RTX 6000 Pro cards are exposed by default (logical CUDA 0,1).
+#   - Override with CUDA_VISIBLE_DEVICES if your topology differs.
 # ============================================================
 
 # --- Memory Management ---
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
-# --- GPU Selection (single Blackwell card) ---
+# --- GPU Selection (dual Blackwell workstation cards) ---
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
-# --- B12X FP6 gates ---
-export B12X_ENABLE_FP6="${B12X_ENABLE_FP6:-1}"
-export B12X_ENABLE_FP6_MICRO="${B12X_ENABLE_FP6_MICRO:-0}"
+# Make sure KLD-scoring-only vars never leak into serving:
+unset TORCH_COMPILE_DISABLE SPARKINFER_DYNAMIC_DETERMINISTIC_OUTPUT 2>/dev/null || true
 
 # --- vLLM / CUDA behavior ---
 export VLLM_NO_USAGE_STATS=1
@@ -83,60 +83,60 @@ if [[ -z "$API_KEY" ]]; then
   exit 2
 fi
 
-MODEL_DIR="${MODEL_DIR:-/media/fmodels/TheHouseOfTheDude/Cydonia-24B-v4.3/FP6}"
-SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Cydonia-24B-v4.3-FP6-W6A6}"
-# Tell the B12X vLLM plugin where the FP6 weights live (inherited by workers).
-# Set UNCONDITIONALLY: a stale B12X_FP6_MODEL_DIR from a previous launch (e.g.
-# the Qwen3.6 dir) makes the plugin index the wrong checkpoint -> every layer
-# silently falls back to BF16 -> loader KeyError on FP6 tensors (input_scale).
-export B12X_FP6_MODEL_DIR="$MODEL_DIR"
+# Local B12X MX-FP6 (W6A6) checkpoint. Override at launch time if needed:
+#   MODEL_DIR=/path/to/model ./behemoth123b-r1-v2-fp6.sh
+MODEL_DIR="${MODEL_DIR:-/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2_FP6}"
+SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Behemoth-R1-123B-v2-FP6-W6A6}"
+# The FP6 export copies tokenizer.json/tokenizer_config.json and
+# chat_template.jinja, so keep tokenizer resolution local by default.
 TOKENIZER="${TOKENIZER:-$MODEL_DIR}"
 
 HOST="${HOST:-0.0.0.0}"
-PORT="${PORT:-8001}"
+PORT="${PORT:-8000}"
 
-# Single GPU -> no tensor parallelism.
-TP_SIZE="${TP_SIZE:-1}"
+# Two GPUs -> tensor parallelism across both cards.
+TP_SIZE="${TP_SIZE:-2}"
 
 # ------------------------------------------------------------
-# Capacity sizing (see VRAM notes above): 128K ctx costs ~20 GiB KV/seq here.
+# Capacity sizing for 2x 96 GiB Blackwell at TP=2.
+# Bump MAX_MODEL_LEN toward 131072 if you only need 1-2 concurrent chats.
 # ------------------------------------------------------------
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
 
-# BF16 KV by default; fp8 KV doubles the token budget if you need concurrency.
+# Blackwell handles fp8 KV cache well; auto (BF16) is the safer default.
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
 
 TOKENIZER_MODE="${TOKENIZER_MODE:-hf}"
 CONFIG_FORMAT="${CONFIG_FORMAT:-auto}"
 LOAD_FORMAT="${LOAD_FORMAT:-auto}"
 
-# B12X MX-FP6 (W6A6); requires the b12x vLLM plugin (general_plugins entry point).
-QUANTIZATION="${QUANTIZATION:-b12x_fp6}"
+# SparkInfer / B12X MX-FP6 (W6A6). Leave empty so vLLM auto-detects from
+# config.json (quant_method=modelopt, quant_algo=W6A6). Override only for
+# debugging, e.g. QUANTIZATION=sparkinfer_fp6.
+QUANTIZATION="${QUANTIZATION:-}"
 
 # Stock Mistral architecture; no custom modeling code needed.
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 
 # ============================================================
-# Model-feature toggles
+# Behemoth / Mistral feature toggles
 # ============================================================
-# Cydonia/Mistral specifics vs the Qwen3.6 script:
-#   - NO reasoning parser: the tokenizer has no <think> tokens (the qwen3
-#     parser hard-fails at startup on this model).
-#   - NO MTP / speculative config: the checkpoint has no draft head.
-#   - NO vision toggles: text-only architecture.
-#   - Tool calling off by default; flip ENABLE_TOOL_CALLING=1 with a parser
-#     if your workload needs it (Mistral-family parser: "mistral").
+# Behemoth-R1 can reason, but this checkpoint does not define <think>
+# tokens. vLLM's deepseek_r1 parser hard-fails without them -- leave off.
+REASONING_PARSER="${REASONING_PARSER:-}"
+
+# Tool calling off by default; flip ENABLE_TOOL_CALLING=1 if needed.
 ENABLE_TOOL_CALLING="${ENABLE_TOOL_CALLING:-0}"
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-mistral}"
 
-# Prefix caching is generally a win for chat/agent workloads.
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"
 
-# CUDA graph setup: full decode-only graphs; pure m=1 decode without MTP, so
-# capture sizes track concurrent sequences (max_num_seqs=4).
+# CUDA graph setup:
+# - full_decode_only keeps CUDA graphs on the decode path and avoids the
+#   highest-memory full-prefill captures.
 CUDAGRAPH_MODE="${CUDAGRAPH_MODE:-full_decode_only}"
 CUDAGRAPH_CAPTURE_SIZES="${CUDAGRAPH_CAPTURE_SIZES:-[1,2,4]}"
 if [[ -z "${COMPILATION_CONFIG:-}" ]]; then
@@ -177,6 +177,12 @@ else
   VLLM_ARGS+=(--compilation-config "$COMPILATION_CONFIG")
 fi
 
+# Blackwell sm_120: vLLM's custom all-reduce kernel crashes during CUDA graph
+# capture at TP>1. Force the NCCL fallback whenever tensor parallelism is on.
+if [[ "$TP_SIZE" -gt 1 ]]; then
+  VLLM_ARGS+=(--disable-custom-all-reduce)
+fi
+
 if [[ "$PROFILE" == "1" ]]; then
   VLLM_ARGS+=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROFILE_DIR}\"}")
 fi
@@ -187,6 +193,10 @@ fi
 
 if [[ "$TRUST_REMOTE_CODE" == "1" ]]; then
   VLLM_ARGS+=(--trust-remote-code)
+fi
+
+if [[ -n "$REASONING_PARSER" ]]; then
+  VLLM_ARGS+=(--reasoning-parser "$REASONING_PARSER")
 fi
 
 if [[ "$ENABLE_TOOL_CALLING" == "1" ]]; then
@@ -206,11 +216,10 @@ echo "  MODEL_DIR=${MODEL_DIR}"
 echo "  SERVED_MODEL_NAME=${SERVED_MODEL_NAME}"
 echo "  TOKENIZER=${TOKENIZER}"
 echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-echo "  B12X_ENABLE_FP6=${B12X_ENABLE_FP6} (micro=${B12X_ENABLE_FP6_MICRO})"
 echo "  TP_SIZE=${TP_SIZE}"
 echo "  MAX_MODEL_LEN=${MAX_MODEL_LEN}"
 echo "  KV_CACHE_DTYPE=${KV_CACHE_DTYPE}"
-echo "  QUANTIZATION=${QUANTIZATION}"
+echo "  QUANTIZATION=${QUANTIZATION:-auto-detect (modelopt W6A6)}"
 echo "  TOOL_CALLING=${ENABLE_TOOL_CALLING} (parser=${TOOL_CALL_PARSER})"
 echo "  PREFIX_CACHING=${ENABLE_PREFIX_CACHING}"
 if [[ "$PROFILE" == "1" ]]; then

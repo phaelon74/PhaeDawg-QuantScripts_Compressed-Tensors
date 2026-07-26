@@ -111,17 +111,23 @@ TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
 
 # Multi-Token Prediction: same spec config as the FP6 launch.
 ENABLE_MTP="${ENABLE_MTP:-1}"
-MTP_SPEC="${MTP_SPEC:-{\"method\":\"qwen3_next_mtp\",\"num_speculative_tokens\":2}}"
+if [[ -z "${MTP_SPEC:-}" ]]; then
+  MTP_SPEC='{"method":"qwen3_next_mtp","num_speculative_tokens":2}'
+fi
 
 TEXT_ONLY="${TEXT_ONLY:-0}"
-MEDIA_IO_KWARGS="${MEDIA_IO_KWARGS:-{\"video\":{\"num_frames\":-1}}}"
+if [[ -z "${MEDIA_IO_KWARGS:-}" ]]; then
+  MEDIA_IO_KWARGS='{"video":{"num_frames":-1}}'
+fi
 
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"
 
 # CUDA graph setup: identical to the FP6 launch for a fair comparison.
 CUDAGRAPH_MODE="${CUDAGRAPH_MODE:-full_decode_only}"
 CUDAGRAPH_CAPTURE_SIZES="${CUDAGRAPH_CAPTURE_SIZES:-[1,2,4]}"
-COMPILATION_CONFIG="${COMPILATION_CONFIG:-{\"mode\":3,\"cudagraph_mode\":\"${CUDAGRAPH_MODE}\",\"cudagraph_capture_sizes\":${CUDAGRAPH_CAPTURE_SIZES}}}"
+if [[ -z "${COMPILATION_CONFIG:-}" ]]; then
+  COMPILATION_CONFIG="{\"mode\":3,\"cudagraph_mode\":\"${CUDAGRAPH_MODE}\",\"cudagraph_capture_sizes\":${CUDAGRAPH_CAPTURE_SIZES}}"
+fi
 
 MAX_CUDAGRAPH_CAPTURE_SIZE="${MAX_CUDAGRAPH_CAPTURE_SIZE:-}"
 

@@ -160,7 +160,9 @@ TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
 # during MTP draft capture, or if you are deliberately benchmarking non-spec
 # throughput.
 ENABLE_MTP="${ENABLE_MTP:-1}"
-MTP_SPEC="${MTP_SPEC:-{\"method\":\"qwen3_next_mtp\",\"num_speculative_tokens\":2}}"
+if [[ -z "${MTP_SPEC:-}" ]]; then
+  MTP_SPEC='{"method":"qwen3_next_mtp","num_speculative_tokens":2}'
+fi
 
 # Vision. This is a VL model; the W8A16 quant left the visual tower in BF16
 # so it works out of the box. Set TEXT_ONLY=1 to skip vision profiling and
@@ -171,7 +173,9 @@ TEXT_ONLY="${TEXT_ONLY:-0}"
 # Optional: per the Qwen3.6 model card, this lets clients drive video frame
 # sampling via extra_body={"mm_processor_kwargs": {"fps": ...}}. Harmless
 # when no video is sent. Comment out if it causes a parser warning.
-MEDIA_IO_KWARGS="${MEDIA_IO_KWARGS:-{\"video\":{\"num_frames\":-1}}}"
+if [[ -z "${MEDIA_IO_KWARGS:-}" ]]; then
+  MEDIA_IO_KWARGS='{"video":{"num_frames":-1}}'
+fi
 
 # Prefix caching is generally a win for chat/agent workloads.
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"
@@ -186,7 +190,9 @@ ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"
 #   MAX_CUDAGRAPH_CAPTURE_SIZE=4 (or 1) below as a fallback.
 CUDAGRAPH_MODE="${CUDAGRAPH_MODE:-full_decode_only}"
 CUDAGRAPH_CAPTURE_SIZES="${CUDAGRAPH_CAPTURE_SIZES:-[1,2,4]}"
-COMPILATION_CONFIG="${COMPILATION_CONFIG:-{\"mode\":3,\"cudagraph_mode\":\"${CUDAGRAPH_MODE}\",\"cudagraph_capture_sizes\":${CUDAGRAPH_CAPTURE_SIZES}}}"
+if [[ -z "${COMPILATION_CONFIG:-}" ]]; then
+  COMPILATION_CONFIG="{\"mode\":3,\"cudagraph_mode\":\"${CUDAGRAPH_MODE}\",\"cudagraph_capture_sizes\":${CUDAGRAPH_CAPTURE_SIZES}}"
+fi
 
 # Fallback for older vLLM versions that do not understand cudagraph_capture_sizes
 # inside --compilation-config, OR the DeltaNet cudagraph cache assert above.

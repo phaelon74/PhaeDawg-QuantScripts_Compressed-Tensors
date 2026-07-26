@@ -1,0 +1,41 @@
+{
+  "title": "Behemoth-R1-123B-v2 Quantization Analysis",
+  "subtitle": "Mean KL Divergence vs. Model File Size",
+  "quants": [
+    {
+      "id": "TheHouseOfTheDude/Behemoth-R1-V2_ModelOpt-NVFP4",
+      "creator": "TheHouseOfTheDude",
+      "type": "NVFP4",
+      "disk_size_gib": 65,
+      "mean_kld": 0.079771
+    },
+    {
+      "id": "TheHouseOfTheDude/Behemoth-R1-123B-v2_W4A16_GS32",
+      "creator": "TheHouseOfTheDude",
+      "type": "W4A16",
+      "disk_size_gib": 65,
+      "mean_kld": 0.042897
+    },
+    {
+      "id": "TheHouseOfTheDude/Behemoth-R1-123B-v2_W8A8-FP8_BLOCK",
+      "creator": "TheHouseOfTheDude",
+      "type": "W8A8-FP8",
+      "disk_size_gib": 115,
+      "mean_kld": 0.011296
+    },
+    {
+      "id": "TheHouseOfTheDude/Behemoth-R1-123B-v2_FP6",
+      "creator": "TheHouseOfTheDude",
+      "type": "FP6",
+      "disk_size_gib": 91,
+      "mean_kld": 0.009547
+    },
+    {
+      "id": "TheHouseOfTheDude/Behemoth-R1-123B-v2_W8A16",
+      "creator": "TheHouseOfTheDude",
+      "type": "W8A16",
+      "disk_size_gib": 117,
+      "mean_kld": 0.001199
+    }
+  ]
+}
