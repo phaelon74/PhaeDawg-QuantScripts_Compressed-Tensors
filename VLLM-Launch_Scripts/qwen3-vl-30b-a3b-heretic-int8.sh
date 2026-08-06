@@ -98,17 +98,31 @@ TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-1}"
 # Qwen3-VL toggles (vision / reasoning / tools)
 # ============================================================
 
-# Qwen3 family reasoning parser. Heretic may not always emit <think>;
-# leave on so clients that request thinking still parse cleanly.
-REASONING_PARSER="${REASONING_PARSER:-qwen3}"
+# Qwen3 family reasoning parser, OFF by default for this checkpoint.
+#
+# Heretic is an Instruct (non-thinking) finetune. With the qwen3 parser on,
+# output that never emits </think> can be routed entirely into
+# `reasoning_content`, leaving `content: null`. Clients that do len(content)
+# then die with "object of type 'NoneType' has no len()".
+#
+# Turn it back on only if you actually want <think> split out:
+#   REASONING_PARSER=qwen3 ./qwen3-vl-30b-a3b-heretic-int8.sh KEY
+REASONING_PARSER="${REASONING_PARSER:-}"
 
 ENABLE_TOOL_CALLING="${ENABLE_TOOL_CALLING:-1}"
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-hermes}"
 
 # Vision preserved in the W8A16 quant. Set TEXT_ONLY=1 to skip multimodal
 # profiling and free VRAM for KV / longer context.
+#
+# LIMIT_MM_IMAGE is a hard per-request cap. Exceeding it returns
+#   HTTP 400 "At most N image(s) may be provided in one prompt."
+# Frame-sampling clients (video analyzers, storyboard promptors) commonly
+# send 8-16 frames as images, so the default is 16 here. Each additional
+# allowed image raises vLLM's multimodal profiling reservation, so lower
+# this if you need the VRAM for KV cache instead.
 TEXT_ONLY="${TEXT_ONLY:-0}"
-LIMIT_MM_IMAGE="${LIMIT_MM_IMAGE:-4}"
+LIMIT_MM_IMAGE="${LIMIT_MM_IMAGE:-16}"
 LIMIT_MM_VIDEO="${LIMIT_MM_VIDEO:-1}"
 
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"
