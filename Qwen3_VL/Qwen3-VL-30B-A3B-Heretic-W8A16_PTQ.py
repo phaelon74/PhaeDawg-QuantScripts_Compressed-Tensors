@@ -46,6 +46,35 @@ from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import QuantizationModifier
 
 
+def _ensure_moe_block_top_k(model) -> int:
+    """
+    llm-compressor's Qwen3-VL-MoE calibration shim reads `original.top_k`, but some
+    Transformers builds only keep `num_experts_per_tok` on the text config / block.
+    Set `.top_k` so MoE modules can be replaced and fused experts unpacked.
+    """
+    text_cfg = (
+        model.config.get_text_config()
+        if hasattr(model.config, "get_text_config")
+        else model.config
+    )
+    fallback_top_k = getattr(text_cfg, "num_experts_per_tok", None)
+    patched = 0
+    for module in model.modules():
+        if module.__class__.__name__ != "Qwen3VLMoeTextSparseMoeBlock":
+            continue
+        if hasattr(module, "top_k"):
+            continue
+        top_k = getattr(module, "num_experts_per_tok", None) or fallback_top_k
+        if top_k is None:
+            raise AttributeError(
+                "Qwen3VLMoeTextSparseMoeBlock has no top_k/num_experts_per_tok; "
+                "cannot prepare MoE calibration replacement."
+            )
+        module.top_k = int(top_k)
+        patched += 1
+    return patched
+
+
 def _resolve_moe_load_context(model_cls):
     """
     Nightly llm-compressor MoE load APIs have moved around:
@@ -82,7 +111,11 @@ def _resolve_moe_load_context(model_cls):
             mod = __import__(import_path, fromlist=["replace_modules_for_calibration"])
             fn = getattr(mod, "replace_modules_for_calibration", None)
             if fn is not None:
-                return contextlib.nullcontext(), fn, f"{import_path}.replace_modules_for_calibration"
+                return (
+                    contextlib.nullcontext(),
+                    fn,
+                    f"{import_path}.replace_modules_for_calibration",
+                )
         except ImportError:
             continue
 
@@ -122,6 +155,9 @@ with load_cm:
 if post_load_fn is not None:
     model = post_load_fn(model)
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+n_top_k = _ensure_moe_block_top_k(model)
+if n_top_k:
+    print(f"Patched top_k on {n_top_k} Qwen3VLMoeTextSparseMoeBlock modules")
 print(f"Loaded model: {MODEL_ID}")
 
 # =========================
