@@ -16,6 +16,13 @@ set -euo pipefail
 #            IGNORED (kept BF16): lm_head, model.visual.*, mlp.gate (router)
 #            Experts ARE quantized. Vision tower preserved.
 #
+# IMPORTANT — Marlin MoE + channel-wise W8A16:
+#   PTQ scheme W8A16 writes group_size=null (channel). Some vLLM nightlies
+#   crash in marlin_moe_padded_intermediate with:
+#     TypeError: '>' not supported between instances of 'NoneType' and 'int'
+#   Fix once on the checkpoint (rewrites null -> -1, backs up *.bak):
+#     python ../Qwen3_VL/patch_w8a16_moe_group_size.py "$MODEL_DIR"
+#
 # GPU selection (4-GPU host, indices 0,1,2,3):
 #   - This script targets physical nvidia-smi GPU 2 (CUDA:2).
 #   - CUDA_VISIBLE_DEVICES=2 exposes only that card; inside vLLM it is
