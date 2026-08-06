@@ -6,7 +6,7 @@ MoE VLM — catplusplus/Qwen3-VL-30B-A3B-Instruct-Heretic
 
   - QuantizationModifier with W8A16 preset (no AWQ, no GPTQ, no calibration data)
   - Qwen3VLMoeForConditionalGeneration + AutoProcessor (official MoE VL pattern)
-  - replace_modules_for_calibration so MoE expert modules get proper quant hooks
+  - load_context(...) for MoE expert linearization / offload-safe load
   - Vision tower left in BF16; MoE experts ARE quantized; router (mlp.gate) skipped
   - Saves processor so vision stays usable in vLLM / Transformers
 
@@ -41,8 +41,8 @@ if not hasattr(_tmu, "TORCH_INIT_FUNCTIONS"):
     }
 
 from llmcompressor import oneshot
-from llmcompressor.modeling import replace_modules_for_calibration
 from llmcompressor.modifiers.quantization import QuantizationModifier
+from llmcompressor.utils import load_context
 
 # =========================
 # CLI
@@ -62,15 +62,14 @@ MODEL_ID = args.model_path
 # =========================
 # Model + processor
 # =========================
-# Official llm-compressor Qwen3-VL-MoE path: specific MoE VL class + processor.
+# Official llm-compressor Qwen3-VL-MoE path: load_context linearizes MoE experts
+# for quantization (replaces the old replace_modules_for_calibration API).
 # NOTE: Qwen3-VL-MoE needs transformers>=4.57 (or install from source).
-model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
-    MODEL_ID, dtype="auto", trust_remote_code=True
-)
+with load_context(Qwen3VLMoeForConditionalGeneration):
+    model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
+        MODEL_ID, dtype="auto", trust_remote_code=True
+    )
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
-
-# Required for MoE expert modules even in datafree PTQ (official Qwen3-VL-MoE example).
-model = replace_modules_for_calibration(model)
 print(f"Loaded model: {MODEL_ID}")
 
 # =========================
@@ -87,7 +86,6 @@ recipe = QuantizationModifier(
     scheme="W8A16",
     ignore=[
         "re:.*lm_head",
-        "re:visual.*",
         "re:model.visual.*",
         "re:.*mlp.gate$",
     ],
