@@ -6,7 +6,8 @@ MoE VLM — catplusplus/Qwen3-VL-30B-A3B-Instruct-Heretic
 
   - QuantizationModifier with W8A16 preset (no AWQ, no GPTQ, no calibration data)
   - Qwen3VLMoeForConditionalGeneration + AutoProcessor (official MoE VL pattern)
-  - load_context(...) for MoE expert linearization / offload-safe load
+  - MoE load helper probed across llm-compressor nightlies (load_context /
+    load_quantizable_moe / replace_modules_for_calibration / plain load)
   - Vision tower left in BF16; MoE experts ARE quantized; router (mlp.gate) skipped
   - Saves processor so vision stays usable in vLLM / Transformers
 
@@ -14,6 +15,7 @@ MoE VLM — catplusplus/Qwen3-VL-30B-A3B-Instruct-Heretic
     python Qwen3-VL-30B-A3B-Heretic-W8A16_PTQ.py /path/to/model /path/to/out-W8A16
 """
 import argparse
+import contextlib
 
 import torch.nn as nn
 from compressed_tensors.offload import dispatch_model
@@ -42,7 +44,53 @@ if not hasattr(_tmu, "TORCH_INIT_FUNCTIONS"):
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import QuantizationModifier
-from llmcompressor.utils import load_context
+
+
+def _resolve_moe_load_context(model_cls):
+    """
+    Nightly llm-compressor MoE load APIs have moved around:
+      newest  -> llmcompressor.utils.load_context
+      prior   -> llmcompressor.modeling.moe.linearize.load_quantizable_moe
+      oldest  -> replace_modules_for_calibration (post-load, not a CM)
+    Returns (context_manager_or_nullcontext, post_load_fn_or_None, label).
+    """
+    try:
+        from llmcompressor.utils import load_context
+
+        return load_context(model_cls), None, "load_context"
+    except ImportError:
+        pass
+
+    for import_path in (
+        "llmcompressor.modeling.moe.linearize",
+        "llmcompressor.modeling.moe",
+        "llmcompressor.modeling.linearize",
+    ):
+        try:
+            mod = __import__(import_path, fromlist=["load_quantizable_moe"])
+            fn = getattr(mod, "load_quantizable_moe", None)
+            if fn is not None:
+                return fn(model_cls), None, f"{import_path}.load_quantizable_moe"
+        except ImportError:
+            continue
+
+    for import_path in (
+        "llmcompressor.modeling",
+        "llmcompressor.modeling.prepare",
+    ):
+        try:
+            mod = __import__(import_path, fromlist=["replace_modules_for_calibration"])
+            fn = getattr(mod, "replace_modules_for_calibration", None)
+            if fn is not None:
+                return contextlib.nullcontext(), fn, f"{import_path}.replace_modules_for_calibration"
+        except ImportError:
+            continue
+
+    return (
+        contextlib.nullcontext(),
+        None,
+        "plain from_pretrained (no MoE load helper in this llm-compressor)",
+    )
 
 # =========================
 # CLI
@@ -62,13 +110,17 @@ MODEL_ID = args.model_path
 # =========================
 # Model + processor
 # =========================
-# Official llm-compressor Qwen3-VL-MoE path: load_context linearizes MoE experts
-# for quantization (replaces the old replace_modules_for_calibration API).
 # NOTE: Qwen3-VL-MoE needs transformers>=4.57 (or install from source).
-with load_context(Qwen3VLMoeForConditionalGeneration):
+load_cm, post_load_fn, load_label = _resolve_moe_load_context(
+    Qwen3VLMoeForConditionalGeneration
+)
+print(f"MoE load path: {load_label}")
+with load_cm:
     model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
         MODEL_ID, dtype="auto", trust_remote_code=True
     )
+if post_load_fn is not None:
+    model = post_load_fn(model)
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
 print(f"Loaded model: {MODEL_ID}")
 
