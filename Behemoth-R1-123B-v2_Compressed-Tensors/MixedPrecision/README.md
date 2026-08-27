@@ -53,10 +53,11 @@ The harness pads AutoRound calibration samples to exactly 2048 tokens and runs
 variable sequence lengths; errors such as `Expected size 2041 but got 2032`
 indicate an older copy of the harness.
 
-AutoRound also defaults to `sequential_targets=["Linear"]`. Its SignSGD tuning
-uses backward passes, so tuning a complete 123B decoder block at once can exceed
-96 GiB even though inference and forward-only GPTQ calibration fit. If a single
-Linear still OOMs, retry with `--autoround-batch-size 1`.
+AutoRound leaves `sequential_targets` unset so llm-compressor infers
+`MistralDecoderLayer` and processes one decoder layer at a time. Its SignSGD
+tuning uses backward passes, so use `--autoround-batch-size 1` for this 123B
+model. Do not use `--sequential-targets Linear` with Transformers 5.16: the
+sequential cache currently mistakes strict config dataclasses for activations.
 
 ## KLD
 

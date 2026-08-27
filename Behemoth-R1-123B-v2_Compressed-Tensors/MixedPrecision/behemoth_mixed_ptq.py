@@ -715,11 +715,10 @@ def main() -> int:
             t.strip() for t in args.sequential_targets.split(",") if t.strip()
         ]
     elif args.algorithm == "autoround":
-        # AutoRound backpropagates through the active target. A full
-        # MistralDecoderLayer is too large even on 96 GiB cards; process each
-        # dense projection independently and offload it before the next one.
-        oneshot_kwargs["sequential_targets"] = ["Linear"]
-        print("AutoRound sequential_targets: ['Linear']")
+        # Leave unset so llm-compressor infers MistralDecoderLayer and processes
+        # one decoder layer at a time. `Linear` currently breaks the sequential
+        # cache with Transformers 5 strict config dataclasses.
+        print("AutoRound sequential_targets: inferred MistralDecoderLayer")
     oneshot(**oneshot_kwargs)
 
     if not args.skip_sample_gen:
