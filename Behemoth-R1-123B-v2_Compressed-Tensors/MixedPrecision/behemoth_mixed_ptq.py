@@ -20,6 +20,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 from contextlib import contextmanager
 import importlib
 import importlib.metadata
@@ -480,13 +481,6 @@ def groups_from_bits(inv, bits_map, group_size: int, symmetric: bool):
     w8_names = [m.name for m in inv.linears if bits_map[m.name] == 8]
     bf16_names = [m.name for m in inv.linears if bits_map[m.name] == 16]
     groups = {}
-    if w8_names:
-        groups["w8"] = QuantizationScheme(
-            targets=w8_names,
-            weights=weight_args(8, group_size, True),
-            input_activations=None,
-            output_activations=None,
-        )
     if w4_names:
         groups["w4"] = QuantizationScheme(
             targets=w4_names if w8_names or bf16_names else ["Linear"],
@@ -494,8 +488,35 @@ def groups_from_bits(inv, bits_map, group_size: int, symmetric: bool):
             input_activations=None,
             output_activations=None,
         )
+    if w8_names:
+        groups["w8"] = QuantizationScheme(
+            targets=w8_names,
+            weights=weight_args(8, group_size, True),
+            input_activations=None,
+            output_activations=None,
+        )
     ignore = list(IGNORE_ALWAYS) + bf16_names
     return groups, ignore
+
+
+def validate_fused_precision(inv, bits_map) -> None:
+    """Require identical schemes for projections fused by vLLM."""
+    by_layer = defaultdict(dict)
+    for module in inv.linears:
+        layer = int(module.name.split(".layers.")[1].split(".")[0])
+        by_layer[layer][module.kind] = bits_map[module.name]
+
+    fused_sets = (("q_proj", "k_proj", "v_proj"), ("gate_proj", "up_proj"))
+    for layer, kinds_to_bits in by_layer.items():
+        for kinds in fused_sets:
+            bits = {kinds_to_bits[kind] for kind in kinds}
+            if len(bits) != 1:
+                detail = ", ".join(
+                    f"{kind}=W{kinds_to_bits[kind]}" for kind in kinds
+                )
+                raise ValueError(
+                    f"Layer {layer} has incompatible fused projection schemes: {detail}"
+                )
 
 
 @contextmanager
@@ -710,6 +731,7 @@ def main() -> int:
         promote_down_proj_layers=promote_layers,
         bf16_regexes=args.bf16_regex or [],
     )
+    validate_fused_precision(inv, bits_map)
     size = estimate(
         inv,
         bits_map,

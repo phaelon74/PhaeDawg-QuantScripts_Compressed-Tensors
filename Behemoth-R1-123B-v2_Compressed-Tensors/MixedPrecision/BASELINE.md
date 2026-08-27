@@ -39,9 +39,14 @@ Use ModelOpt only for sensitivity ranking until a TP=4 mixed checkpoint loads in
 | Path | `du -sh` | Mean KLD vs `ref_logits_Behemoth-R1-123B-v2_ctx2048_s512` |
 | --- | --- | --- |
 | `/media/fmodels2/TheHouseOfTheDude/Behemoth-R1-123B-v2/W4A16_GS32` | 66G | 0.042380 (204700 positions) |
-| `/media/fmodels2/TheHouseOfTheDude/Behemoth-R1-123B-v2/W4A16_GS32_AWQMSK` | 66G | pending — score this before ranking new candidates |
+| `/media/fmodels2/TheHouseOfTheDude/Behemoth-R1-123B-v2/W4A16_GS32_AWQMSK` | 66G | 0.042729 (204700 positions; rejected) |
 | `/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/Candidate2` | 66G | 0.046951 (204700 positions; GPTQ GS32; rejected) |
+| `/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/Candidate3_AutoRound_GS32` | 66G | **0.037094** (204700 positions; current winner) |
 
 Reference logits: `~/kld-nightly-vllm/kld-vllm/ref_logits_Behemoth-R1-123B-v2_ctx2048_s512/` (25G).
 
 A later candidate only counts if it is ≤70 GiB, lower mean KLD than the reproduced GS32 number, and loadable at TP=4 with ≥32K BF16 KV on the 3090 box.
+
+Candidate3 passes the size, KLD, TP=4, Marlin, 32K-context, memory, and
+throughput gates. AutoRound is the selected algorithm for GS128 donor and mixed
+W4/W8 experiments. Do not spend another full run on AWQ or pure GPTQ.

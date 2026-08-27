@@ -1,0 +1,7 @@
+# Uniform donor used to measure the GS32 -> GS128 accuracy trade-off.
+algorithm: autoround
+group_size: 128
+asymmetric: false
+promote_down_proj_layers: []
+w8_regex: []
+bf16_regex: []
