@@ -1,0 +1,46 @@
+algorithm: autoround
+group_size: 128
+asymmetric: false
+promote_down_proj_layers:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 29
+  - 30
+  - 31
+  - 32
+  - 33
+  - 35
+  - 36
+  - 38
+  - 39
+  - 81
+  - 84
+  - 85
+  - 86
+  - 87
+w8_regex: []
+bf16_regex: []
+metadata:
+  sensitivity_method: streamed_symmetric_qdq_relative_gain_per_byte
+  budget_gib: 66.0
+  estimated_total_gib: 65.6318359375
+  w8_module_count: 34
+  promotion_unit_count: 34
