@@ -1,0 +1,11 @@
+# Example mixed-precision policy. CLI flags override these values.
+#
+# Promote only a few down_proj layers — promoting all 88 adds ~15 GiB
+# and will miss the 70 GiB cap at GS32.
+
+algorithm: gptq
+group_size: 128
+asymmetric: false
+promote_down_proj_layers: []
+w8_regex: []
+bf16_regex: []
