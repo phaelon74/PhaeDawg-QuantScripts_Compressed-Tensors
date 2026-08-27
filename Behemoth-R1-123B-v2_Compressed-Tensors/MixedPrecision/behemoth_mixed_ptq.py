@@ -12,14 +12,18 @@ Run in the llm-compressor venv, not the vLLM KLD venv.
 Examples:
   python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml --dry-run
   python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \\
-      --algorithm autoround --group-size 32 --autoround-batch-size 1
+      --algorithm autoround --group-size 32 --autoround-batch-size 1 \\
+      --autoround-gradient-accumulate-steps 8 --autoround-low-gpu-mem
   python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \\
       --algorithm awq --group-size 32 --asymmetric
 """
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import importlib
 import importlib.metadata
+import inspect
 import json
 import os
 import shutil
@@ -494,6 +498,39 @@ def groups_from_bits(inv, bits_map, group_size: int, symmetric: bool):
     return groups, ignore
 
 
+@contextmanager
+def autoround_memory_runtime(low_gpu_mem_usage: bool, gradient_accumulate_steps: int):
+    """Inject AutoRound memory controls missing from llm-compressor's modifier."""
+    from llmcompressor.modifiers.autoround import AutoRoundModifier
+
+    modifier_module = importlib.import_module(AutoRoundModifier.__module__)
+    original_autoround = modifier_module.AutoRound
+    supported = inspect.signature(original_autoround).parameters
+    required = {"low_gpu_mem_usage", "gradient_accumulate_steps"}
+    missing = sorted(required - set(supported))
+    if missing:
+        raise RuntimeError(
+            "Installed AutoRound does not support required memory controls: "
+            f"{', '.join(missing)}"
+        )
+
+    def configured_autoround(*factory_args, **factory_kwargs):
+        factory_kwargs["low_gpu_mem_usage"] = low_gpu_mem_usage
+        factory_kwargs["gradient_accumulate_steps"] = gradient_accumulate_steps
+        configured = original_autoround(*factory_args, **factory_kwargs)
+        if configured.gradient_accumulate_steps != gradient_accumulate_steps:
+            raise RuntimeError("AutoRound ignored gradient_accumulate_steps")
+        if low_gpu_mem_usage and configured.compress_context.cache_device.type != "cpu":
+            raise RuntimeError("AutoRound low-memory cache is not on CPU")
+        return configured
+
+    modifier_module.AutoRound = configured_autoround
+    try:
+        yield
+    finally:
+        modifier_module.AutoRound = original_autoround
+
+
 def build_recipe(args, inv, bits_map):
     groups, ignore = groups_from_bits(
         inv, bits_map, args.group_size, not args.asymmetric
@@ -510,8 +547,20 @@ def build_recipe(args, inv, bits_map):
         print(f"AutoRound version: {installed}")
         from llmcompressor.modifiers.autoround import AutoRoundModifier
 
+        modifier_cls = AutoRoundModifier
+        if args.autoround_low_gpu_mem:
+            class CPUCachedAutoRoundModifier(AutoRoundModifier):
+                @staticmethod
+                def _move_inputs_to(inputs, _device):
+                    # AutoRound's low-memory path owns per-mini-batch transfers.
+                    # Force captured GPU tensors off-device and avoid eagerly
+                    # moving 512x2048 hidden states back (24 GiB per cache).
+                    return AutoRoundModifier._move_inputs_to(inputs, "cpu")
+
+            modifier_cls = CPUCachedAutoRoundModifier
+
         return [
-            AutoRoundModifier(
+            modifier_cls(
                 ignore=ignore,
                 config_groups=groups,
                 iters=args.autoround_iters,
@@ -597,7 +646,19 @@ def parse_args():
     parser.add_argument("--autoround-iters", type=int, default=200)
     parser.add_argument("--autoround-batch-size", type=int, default=1)
     parser.add_argument("--autoround-lr", type=float, default=None)
-    parser.add_argument("--autoround-device-ids", default="auto")
+    parser.add_argument("--autoround-device-ids", default="0,1,2,3")
+    parser.add_argument(
+        "--autoround-gradient-accumulate-steps",
+        type=int,
+        default=8,
+        help="Effective tuning batch accumulation; 8 is AutoRound's low-VRAM recommendation.",
+    )
+    parser.add_argument(
+        "--autoround-low-gpu-mem",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cache block inputs/outputs on CPU and stream mini-batches (default: enabled).",
+    )
     parser.add_argument("--autoround-disable-opt-rtn", action="store_true")
     parser.add_argument("--disable-torch-compile", action="store_true")
     parser.add_argument("--use-loss-mask", action="store_true")
@@ -608,7 +669,7 @@ def parse_args():
     parser.add_argument(
         "--sequential-targets",
         default=None,
-        help="Optional oneshot sequential_targets (e.g. MistralMLP).",
+        help="Advanced oneshot override; leave unset for AutoRound decoder-layer tuning.",
     )
     return parser.parse_args()
 
@@ -637,6 +698,8 @@ def main() -> int:
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     args = parse_args()
     args = merge_policy(args, load_policy_yaml(args.policy_yaml))
+    if args.autoround_gradient_accumulate_steps < 1:
+        raise ValueError("--autoround-gradient-accumulate-steps must be >= 1")
 
     promote_layers = parse_layer_list(args.promote_down_proj_layers)
 
@@ -697,6 +760,14 @@ def main() -> int:
         trust_remote_code=True,
         local_files_only=True,
     )
+    if args.algorithm == "autoround":
+        hidden_size = int(model.config.hidden_size)
+        element_size = next(model.parameters()).element_size()
+        cache_gib = len(ds) * max_seq_length * hidden_size * element_size / GIB
+        print(
+            f"AutoRound hidden-state cache: {cache_gib:.2f} GiB each; "
+            f"up to {3 * cache_gib:.2f} GiB for input/reference/quantized caches"
+        )
 
     recipe = build_recipe(args, inv, bits_map)
     print(f"Recipe modifiers: {[type(m).__name__ for m in recipe]}")
@@ -719,25 +790,24 @@ def main() -> int:
             t.strip() for t in args.sequential_targets.split(",") if t.strip()
         ]
     elif args.algorithm == "autoround":
-        # A full MistralDecoderLayer OOMs during SignSGD backward. Individual
-        # Linear nodes are not valid FX boundaries for this Transformers graph
-        # (`args` leaks into Linear.forward). Split at natural architecture
-        # sub-blocks so attention and MLP are tuned and offloaded separately.
-        available_classes = {type(module).__name__ for module in model.modules()}
-        targets = [
-            name
-            for name in ("MistralAttention", "MistralMLP")
-            if name in available_classes
-        ]
-        if len(targets) != 2:
-            raise RuntimeError(
-                "Expected MistralAttention and MistralMLP module classes for "
-                "memory-bounded AutoRound; found targets "
-                f"{targets}. Pass --sequential-targets with the exact classes."
-            )
-        oneshot_kwargs["sequential_targets"] = targets
-        print(f"AutoRound sequential_targets: {targets}")
-    oneshot(**oneshot_kwargs)
+        print("AutoRound sequential_targets: inferred full decoder layer")
+
+    if args.algorithm == "autoround":
+        print(
+            "AutoRound memory mode: "
+            f"low_gpu_mem_usage={args.autoround_low_gpu_mem} "
+            "CPU block cache="
+            f"{args.autoround_low_gpu_mem} "
+            "gradient_accumulate_steps="
+            f"{args.autoround_gradient_accumulate_steps}"
+        )
+        with autoround_memory_runtime(
+            args.autoround_low_gpu_mem,
+            args.autoround_gradient_accumulate_steps,
+        ):
+            oneshot(**oneshot_kwargs)
+    else:
+        oneshot(**oneshot_kwargs)
 
     if not args.skip_sample_gen:
         print("\n========== SAMPLE GENERATION ==============")

@@ -31,7 +31,8 @@ python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml --dry-run
 python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \
   --algorithm autoround --group-size 32 \
   --autoround-iters 200 --autoround-batch-size 1 \
-  --autoround-device-ids auto --skip-sample-gen
+  --autoround-gradient-accumulate-steps 8 --autoround-low-gpu-mem \
+  --autoround-device-ids 0,1,2,3 --skip-sample-gen
 
 # Candidate 4: canonical asymmetric AWQ GS32, same calibration.
 python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \
@@ -53,11 +54,16 @@ The harness pads AutoRound calibration samples to exactly 2048 tokens and runs
 variable sequence lengths; errors such as `Expected size 2041 but got 2032`
 indicate an older copy of the harness.
 
-AutoRound splits sequential tuning at `MistralAttention` and `MistralMLP`.
-SignSGD backward on a complete 123B decoder layer exceeds 96 GiB even at batch
-size 1, while an individual `Linear` is not a valid FX boundary for this
-Transformers graph (`args` is forwarded incorrectly). Natural attention/MLP
-sub-blocks keep both paths tuned while reducing peak memory.
+AutoRound tunes the inferred full decoder layer. The low-memory compatibility
+path keeps the 512x2048 block-input, reference-output, and propagated quantized
+input caches on CPU and streams one sample at a time. Each hidden-state cache is
+24 GiB for this model; eagerly retaining all three on GPU leaves too little
+space for SignSGD backward. Gradient accumulation of 8 restores AutoRound's
+effective tuning batch while preserving batch-size-1 peak VRAM.
+
+Allow roughly 72 GiB of host RAM for those three activation caches in addition
+to model/offload memory. Disabling `--autoround-low-gpu-mem` is not viable for
+the 512x2048 recipe on 96 GiB GPUs.
 
 ## KLD
 
