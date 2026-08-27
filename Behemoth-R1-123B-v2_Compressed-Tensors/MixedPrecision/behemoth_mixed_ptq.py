@@ -714,6 +714,12 @@ def main() -> int:
         oneshot_kwargs["sequential_targets"] = [
             t.strip() for t in args.sequential_targets.split(",") if t.strip()
         ]
+    elif args.algorithm == "autoround":
+        # AutoRound backpropagates through the active target. A full
+        # MistralDecoderLayer is too large even on 96 GiB cards; process each
+        # dense projection independently and offload it before the next one.
+        oneshot_kwargs["sequential_targets"] = ["Linear"]
+        print("AutoRound sequential_targets: ['Linear']")
     oneshot(**oneshot_kwargs)
 
     if not args.skip_sample_gen:

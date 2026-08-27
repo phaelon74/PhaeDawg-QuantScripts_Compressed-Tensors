@@ -53,6 +53,11 @@ The harness pads AutoRound calibration samples to exactly 2048 tokens and runs
 variable sequence lengths; errors such as `Expected size 2041 but got 2032`
 indicate an older copy of the harness.
 
+AutoRound also defaults to `sequential_targets=["Linear"]`. Its SignSGD tuning
+uses backward passes, so tuning a complete 123B decoder block at once can exceed
+96 GiB even though inference and forward-only GPTQ calibration fit. If a single
+Linear still OOMs, retry with `--autoround-batch-size 1`.
+
 ## KLD
 
 Score against `ref_logits_Behemoth-R1-123B-v2_ctx2048_s512` in the vLLM env. The GS32 baseline to beat is **mean KLD 0.042380**. Finish `W4A16_GS32_AWQMSK` before ranking new runs. Do not start mixed W4/W8 promotion until the best uniform AutoRound/AWQ recipe is known.
