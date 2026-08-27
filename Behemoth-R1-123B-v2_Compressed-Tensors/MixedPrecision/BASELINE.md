@@ -42,11 +42,18 @@ Use ModelOpt only for sensitivity ranking until a TP=4 mixed checkpoint loads in
 | `/media/fmodels2/TheHouseOfTheDude/Behemoth-R1-123B-v2/W4A16_GS32_AWQMSK` | 66G | 0.042729 (204700 positions; rejected) |
 | `/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/Candidate2` | 66G | 0.046951 (204700 positions; GPTQ GS32; rejected) |
 | `/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/Candidate3_AutoRound_GS32` | 66G | **0.037094** (204700 positions; current winner) |
+| GS128 AutoRound mixed candidate | pending exact path/size | 0.043462 (204700 positions; rejected) |
 
 Reference logits: `~/kld-nightly-vllm/kld-vllm/ref_logits_Behemoth-R1-123B-v2_ctx2048_s512/` (25G).
 
 A later candidate only counts if it is ≤70 GiB, lower mean KLD than the reproduced GS32 number, and loadable at TP=4 with ≥32K BF16 KV on the 3090 box.
 
 Candidate3 passes the size, KLD, TP=4, Marlin, 32K-context, memory, and
-throughput gates. AutoRound is the selected algorithm for GS128 donor and mixed
-W4/W8 experiments. Do not spend another full run on AWQ or pure GPTQ.
+throughput gates. AutoRound GS32 is the fixed donor configuration for mixed
+W4/W8 experiments. The GS128 result is rejected; its W8 capacity did not offset
+the accuracy loss from coarser W4 groups. Do not spend another full run on
+GS128, AWQ, or pure GPTQ.
+
+Mixed checkpoints must be quantized from the BF16 source in one AutoRound run:
+GS32 W4 for the default scheme and GS32 W8 for selected modules. Do not attempt
+to promote weights from the already compressed Candidate3 checkpoint.

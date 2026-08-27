@@ -207,6 +207,40 @@ def aggregate_units(module_scores: list[dict]) -> list[dict]:
     return units
 
 
+def load_reusable_scores(
+    path: Path,
+    inventory,
+    group_size: int,
+    target_kinds: set[str],
+) -> list[dict]:
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if payload.get("group_size") != group_size:
+        raise ValueError(
+            f"Score group_size={payload.get('group_size')} does not match "
+            f"--group-size {group_size}"
+        )
+    if set(payload.get("promotion_kinds", [])) != target_kinds:
+        raise ValueError(
+            "Score promotion_kinds do not match --promotion-kinds: "
+            f"{payload.get('promotion_kinds')} vs {sorted(target_kinds)}"
+        )
+
+    module_scores = payload.get("modules")
+    if not isinstance(module_scores, list):
+        raise ValueError(f"Reusable score file has no module list: {path}")
+    expected = {
+        module.name for module in inventory.linears if module.kind in target_kinds
+    }
+    actual = {row.get("name") for row in module_scores}
+    if actual != expected:
+        raise ValueError(
+            "Reusable score modules do not match the model inventory: "
+            f"missing={len(expected - actual)}, unexpected={len(actual - expected)}"
+        )
+    return module_scores
+
+
 def estimate_selection(inventory, selected: set[str], group_size: int) -> dict:
     bits_map = {
         module.name: (8 if module.name in selected else 4)
@@ -263,6 +297,42 @@ def budget_slug(budget_gib: float) -> str:
     return f"{text}g"
 
 
+def select_exact_additions(
+    units: list[dict],
+    locked_names: set[str],
+    capacity_bytes: int,
+) -> list[dict]:
+    candidates = [row for row in units if row["name"] not in locked_names]
+    if not candidates or capacity_bytes <= 0:
+        return []
+
+    quantum = candidates[0]["extra_bytes"]
+    for row in candidates[1:]:
+        quantum = math.gcd(quantum, row["extra_bytes"])
+    capacity = capacity_bytes // quantum
+    states: list[tuple[float, tuple[int, ...]] | None] = [None] * (capacity + 1)
+    states[0] = (0.0, ())
+
+    for index, row in enumerate(candidates):
+        cost = row["extra_bytes"] // quantum
+        utility = row["relative_gain"]
+        for used in range(capacity, cost - 1, -1):
+            previous = states[used - cost]
+            if previous is None:
+                continue
+            proposal = (previous[0] + utility, previous[1] + (index,))
+            current = states[used]
+            if current is None or proposal[0] > current[0]:
+                states[used] = proposal
+
+    best_used, best = max(
+        ((used, state) for used, state in enumerate(states) if state is not None),
+        key=lambda item: (item[1][0], item[0]),
+    )
+    del best_used
+    return [candidates[index] for index in best[1]]
+
+
 def generate_nested_policies(
     inventory,
     units: list[dict],
@@ -286,15 +356,16 @@ def generate_nested_policies(
             )
 
         current = estimate_selection(inventory, selected_modules, group_size)
-        for unit in units:
-            if unit["name"] in selected_unit_names:
-                continue
-            if current["total_bytes"] + unit["extra_bytes"] > effective_limit:
-                continue
+        additions = select_exact_additions(
+            units,
+            selected_unit_names,
+            int(effective_limit - current["total_bytes"]),
+        )
+        for unit in sorted(additions, key=lambda row: row["rank"]):
             selected_unit_names.add(unit["name"])
             selected_units.append(unit)
             selected_modules.update(unit["members"])
-            current = estimate_selection(inventory, selected_modules, group_size)
+        current = estimate_selection(inventory, selected_modules, group_size)
 
         output_path = policy_dir / (
             f"autoround_gs{group_size}_mixed_{budget_slug(budget)}.yaml"
@@ -366,6 +437,11 @@ def parse_args():
         help="Destination for reusable module and promotion-unit scores.",
     )
     parser.add_argument(
+        "--reuse-scores",
+        action="store_true",
+        help="Load --score-json and regenerate policies without rescoring weights.",
+    )
+    parser.add_argument(
         "--policy-dir",
         default="recipes/generated",
         help="Directory for generated AutoRound policy YAML files.",
@@ -380,35 +456,43 @@ def main() -> int:
     if args.safety_margin_gib < 0:
         raise ValueError("--safety-margin-gib must be >= 0")
 
-    device = choose_device(args.device)
     budgets = parse_budgets(args.budgets)
     target_kinds = parse_kinds(args.promotion_kinds)
-    print(
-        f"Scoring {args.model_dir} on {device} with symmetric "
-        f"W4/W8 group-size {args.group_size}; kinds={sorted(target_kinds)}"
-    )
-    inventory, module_scores = score_modules(
-        args.model_dir,
-        args.group_size,
-        args.chunk_rows,
-        device,
-        target_kinds,
-    )
+    score_path = Path(args.score_json)
+    if args.reuse_scores:
+        inventory = build_inventory(args.model_dir)
+        module_scores = load_reusable_scores(
+            score_path, inventory, args.group_size, target_kinds
+        )
+        print(f"Reusing sensitivity scores: {score_path}")
+    else:
+        device = choose_device(args.device)
+        print(
+            f"Scoring {args.model_dir} on {device} with symmetric "
+            f"W4/W8 group-size {args.group_size}; kinds={sorted(target_kinds)}"
+        )
+        inventory, module_scores = score_modules(
+            args.model_dir,
+            args.group_size,
+            args.chunk_rows,
+            device,
+            target_kinds,
+        )
     units = aggregate_units(module_scores)
 
-    score_payload = {
-        "model_dir": os.path.abspath(args.model_dir),
-        "group_size": args.group_size,
-        "method": "streamed_symmetric_qdq_relative_gain_per_byte",
-        "promotion_kinds": sorted(target_kinds),
-        "modules": module_scores,
-        "promotion_units": units,
-    }
-    score_path = Path(args.score_json)
-    score_path.parent.mkdir(parents=True, exist_ok=True)
-    with score_path.open("w", encoding="utf-8") as handle:
-        json.dump(score_payload, handle, indent=2)
-    print(f"Saved sensitivity scores: {score_path}")
+    if not args.reuse_scores:
+        score_payload = {
+            "model_dir": os.path.abspath(args.model_dir),
+            "group_size": args.group_size,
+            "method": "streamed_symmetric_qdq_relative_gain_per_byte",
+            "promotion_kinds": sorted(target_kinds),
+            "modules": module_scores,
+            "promotion_units": units,
+        }
+        score_path.parent.mkdir(parents=True, exist_ok=True)
+        with score_path.open("w", encoding="utf-8") as handle:
+            json.dump(score_payload, handle, indent=2)
+        print(f"Saved sensitivity scores: {score_path}")
 
     outputs = generate_nested_policies(
         inventory,

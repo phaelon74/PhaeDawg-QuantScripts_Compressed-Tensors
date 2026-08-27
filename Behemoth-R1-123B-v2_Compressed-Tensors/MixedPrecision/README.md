@@ -6,7 +6,9 @@ KLD scoring stays in the vLLM venv. This harness runs in the **llm-compressor** 
 
 ## Size rule
 
-Hard cap **70 GiB**. Aim **65–68 GiB**. Group-size 32 already uses ~66 GiB with uniform W4; GS128 is the donor format when promoting layers to W8.
+Hard cap **70 GiB**. AutoRound GS32 is the fixed donor configuration: its
+measured KLD is 0.037094. A GS128 mixed candidate regressed to 0.043462 and is
+rejected. Spend the remaining GS32 size budget only on targeted W8 promotions.
 
 Preflight (config.json only, no weight load):
 
@@ -34,16 +36,8 @@ python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \
   --autoround-gradient-accumulate-steps 8 --autoround-low-gpu-mem \
   --autoround-device-ids 0,1,2,3 --skip-sample-gen
 
-# Candidate 4: canonical asymmetric AWQ GS32, same calibration.
-python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \
-  --algorithm awq --group-size 32 --asymmetric --skip-sample-gen
-
-# Candidate 4 is cancelled. Build the uniform GS128 AutoRound donor instead.
-python behemoth_mixed_ptq.py SRC DST_GS128 recipes/baseline_512.yaml \
-  --policy-yaml recipes/autoround_gs128_uniform.yaml \
-  --autoround-iters 200 --autoround-batch-size 1 \
-  --autoround-gradient-accumulate-steps 8 --autoround-low-gpu-mem \
-  --autoround-device-ids 0,1,2,3 --skip-sample-gen
+# GS128, AWQ, and pure GPTQ branches are rejected. Continue with GS32 mixed
+# W4/W8 policies below.
 ```
 
 `--max-disk-gib 70` is enforced before `from_pretrained`.
@@ -74,26 +68,31 @@ the 512x2048 recipe on 96 GiB GPUs.
 
 ## Mixed W4/W8 search
 
-After the uniform GS128 donor is running, rank every `down_proj` without loading
-the 123B model. The scorer streams safetensor row chunks through one GPU,
-compares symmetric GS128 W4 and W8 reconstruction error, and writes nested
-policies with a 0.25 GiB safety margin:
+Rank GS32 W4-to-W8 promotion benefit from the original BF16 weights. The scorer
+streams safetensor row chunks through one GPU, groups vLLM-fused projections
+together, and writes nested GS32 policies with a 0.25 GiB safety margin:
 
 ```bash
 python rank_weight_sensitivity.py SRC \
-  --group-size 128 --device cuda:0 \
+  --group-size 32 --device cuda:0 \
+  --promotion-kinds all \
   --budgets 66,68,69.5 \
-  --score-json results/sensitivity_gs128.json \
+  --score-json results/sensitivity_gs32.json \
   --policy-dir recipes/generated
 ```
 
-`down_proj` is the production-safe default. `--promotion-kinds all` enables
-broader experimentation while keeping Q/K/V and gate/up fused units together.
+Once that score file exists, regenerate exact nested policies without touching
+the weights or GPU by adding `--reuse-scores`. The policy optimizer uses exact
+knapsack packing rather than greedy rank order.
+
+This weight-only score is a screening proxy. Prefer the pending ModelOpt
+gradient score for final policy selection; the frozen KLD suite remains the
+selection authority.
 
 Preflight every generated policy before loading weights:
 
 ```bash
-for POLICY in recipes/generated/autoround_gs128_mixed_*.yaml; do
+for POLICY in recipes/generated/autoround_gs32_mixed_*.yaml; do
   python behemoth_mixed_ptq.py SRC /tmp/not-used recipes/baseline_512.yaml \
     --policy-yaml "$POLICY" --dry-run
 done
@@ -103,7 +102,7 @@ Quantize each policy with the same AutoRound settings as Candidate3:
 
 ```bash
 python behemoth_mixed_ptq.py SRC DST_MIXED_66 recipes/baseline_512.yaml \
-  --policy-yaml recipes/generated/autoround_gs128_mixed_66g.yaml \
+  --policy-yaml recipes/generated/autoround_gs32_mixed_66g.yaml \
   --autoround-iters 200 --autoround-batch-size 1 \
   --autoround-gradient-accumulate-steps 8 --autoround-low-gpu-mem \
   --autoround-device-ids 0,1,2,3 --skip-sample-gen
@@ -117,4 +116,5 @@ the frozen 204700-position KLD result remains the selection authority.
 Score against `ref_logits_Behemoth-R1-123B-v2_ctx2048_s512` in the vLLM
 environment. AutoRound GS32 is the current winner at **0.037094**, versus
 0.042380 for the original baseline, 0.042729 for AWQMSK, and 0.046951 for
-GPTQ. Use AutoRound for the GS128 donor and all mixed W4/W8 candidates.
+GPTQ. The GS128 mixed result at 0.043462 is also rejected. Use AutoRound GS32
+for the default W4 scheme and selected GS32 W8 promotions.
