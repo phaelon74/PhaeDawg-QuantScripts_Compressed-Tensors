@@ -332,7 +332,15 @@ FORMATTERS = {
 }
 
 
-def load_calibration(recipe_yaml, tokenizer, seed, shuffle, max_seq_length, use_loss_mask):
+def load_calibration(
+    recipe_yaml,
+    tokenizer,
+    seed,
+    shuffle,
+    max_seq_length,
+    use_loss_mask,
+    fixed_length=False,
+):
     with open(recipe_yaml, "r", encoding="utf-8") as f:
         recipe_file = yaml.safe_load(f)
     calibration_config = recipe_file.get("calibration_set", {})
@@ -345,7 +353,10 @@ def load_calibration(recipe_yaml, tokenizer, seed, shuffle, max_seq_length, use_
     datasets_config = calibration_config.get("datasets", [])
 
     print(f"Loaded calibration recipe: {recipe_yaml}")
-    print(f"  max_seq_length={max_seq_length} shuffle={shuffle} seed={seed}")
+    print(
+        f"  max_seq_length={max_seq_length} shuffle={shuffle} seed={seed} "
+        f"fixed_length={fixed_length}"
+    )
 
     all_parts = []
     for ds_config in datasets_config:
@@ -395,13 +406,21 @@ def load_calibration(recipe_yaml, tokenizer, seed, shuffle, max_seq_length, use_
     if shuffle:
         ds = ds.shuffle(seed=seed)
 
+    if fixed_length and tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is None:
+            raise ValueError(
+                "AutoRound fixed-length calibration requires a pad or EOS token."
+            )
+        tokenizer.pad_token = tokenizer.eos_token
+
     def tokenize_with_mask(batch):
         result = tokenizer(
             batch["text"],
-            padding=False,
+            padding="max_length" if fixed_length else False,
             max_length=max_seq_length,
             truncation=True,
             add_special_tokens=False,
+            return_attention_mask=True,
         )
         if use_loss_mask:
             loss_masks = []
@@ -423,6 +442,16 @@ def load_calibration(recipe_yaml, tokenizer, seed, shuffle, max_seq_length, use_
         remove_columns=ds.column_names,
         num_proc=1 if use_loss_mask else 4,
     )
+    if fixed_length:
+        from llmcompressor.modifiers.autoround import fix_batch_if_needed
+
+        ds = ds.map(fix_batch_if_needed, num_proc=1)
+        lengths = set(len(ids) for ids in ds["input_ids"])
+        if lengths != {max_seq_length}:
+            raise RuntimeError(
+                "AutoRound calibration must be fixed-length; "
+                f"found lengths {sorted(lengths)[:10]}"
+            )
     print(f"Tokenized {len(ds)} calibration samples")
     return ds, max_seq_length
 
@@ -646,6 +675,7 @@ def main() -> int:
         shuffle=None,
         max_seq_length=args.max_seq_length,
         use_loss_mask=args.use_loss_mask,
+        fixed_length=args.algorithm == "autoround",
     )
 
     try:
