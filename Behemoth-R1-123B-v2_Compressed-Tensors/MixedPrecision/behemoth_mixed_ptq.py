@@ -27,7 +27,12 @@ import shutil
 import torch.nn as nn
 import yaml
 from datasets import Dataset, concatenate_datasets, load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    GenerationConfig,
+    PretrainedConfig,
+)
 
 import transformers.modeling_utils as _tmu
 
@@ -74,6 +79,46 @@ SIDECAR_FILES = (
 )
 
 IGNORE_ALWAYS = ["lm_head"]
+
+
+class _AtomicConfig:
+    """Non-dataclass holder so llm-compressor does not recurse into HF configs."""
+
+    def __init__(self, value):
+        self.value = value
+
+
+def patch_transformers_config_cache() -> None:
+    """
+    Treat Transformers 5 strict config dataclasses as immutable metadata.
+
+    llm-compressor's sequential cache recursively wraps dataclass fields in
+    IntermediateValue. Transformers 5.16 validates fields during reconstruction,
+    so a str field such as transformers_version rejects the wrapper. Keeping the
+    config atomic is correct: it contains no activation tensor to offload.
+    """
+    from llmcompressor.pipelines.cache import IntermediateValue, IntermediatesCache
+
+    if getattr(IntermediatesCache, "_behemoth_atomic_config_patch", False):
+        return
+
+    original_offload = IntermediatesCache._offload_value
+    original_onload = IntermediatesCache._onload_value
+
+    def patched_offload(cls, value, offload_device, onload_device=None):
+        if isinstance(value, PretrainedConfig):
+            return IntermediateValue(value=_AtomicConfig(value), device=None)
+        return original_offload(value, offload_device, onload_device)
+
+    def patched_onload(cls, intermediate):
+        if isinstance(intermediate.value, _AtomicConfig):
+            return intermediate.value.value
+        return original_onload(intermediate)
+
+    IntermediatesCache._offload_value = classmethod(patched_offload)
+    IntermediatesCache._onload_value = classmethod(patched_onload)
+    IntermediatesCache._behemoth_atomic_config_patch = True
+    print("Applied Transformers 5 strict-config sequential-cache compatibility patch")
 
 
 def _import_awq():
@@ -715,10 +760,12 @@ def main() -> int:
             t.strip() for t in args.sequential_targets.split(",") if t.strip()
         ]
     elif args.algorithm == "autoround":
-        # Leave unset so llm-compressor infers MistralDecoderLayer and processes
-        # one decoder layer at a time. `Linear` currently breaks the sequential
-        # cache with Transformers 5 strict config dataclasses.
-        print("AutoRound sequential_targets: inferred MistralDecoderLayer")
+        # A whole decoder layer OOMs during SignSGD backward on this 123B model.
+        # Linear is llm-compressor's supported dense-model fallback; patch the
+        # Transformers 5 strict-config cache incompatibility before using it.
+        patch_transformers_config_cache()
+        oneshot_kwargs["sequential_targets"] = ["Linear"]
+        print("AutoRound sequential_targets: ['Linear']")
     oneshot(**oneshot_kwargs)
 
     if not args.skip_sample_gen:
