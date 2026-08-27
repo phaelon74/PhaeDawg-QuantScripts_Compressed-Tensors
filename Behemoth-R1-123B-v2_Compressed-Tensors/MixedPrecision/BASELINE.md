@@ -40,6 +40,7 @@ Use ModelOpt only for sensitivity ranking until a TP=4 mixed checkpoint loads in
 | --- | --- | --- |
 | `/media/fmodels2/TheHouseOfTheDude/Behemoth-R1-123B-v2/W4A16_GS32` | 66G | 0.042380 (204700 positions) |
 | `/media/fmodels2/TheHouseOfTheDude/Behemoth-R1-123B-v2/W4A16_GS32_AWQMSK` | 66G | pending — score this before ranking new candidates |
+| `/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/Candidate2` | 66G | 0.046951 (204700 positions; GPTQ GS32; rejected) |
 
 Reference logits: `~/kld-nightly-vllm/kld-vllm/ref_logits_Behemoth-R1-123B-v2_ctx2048_s512/` (25G).
 

@@ -23,25 +23,31 @@ Exit code 2 means over budget.
 
 ```bash
 # Dry run (size only)
-python behemoth_mixed_ptq.py SRC DST ../../Recipes/Datasets/General_reasoning.yaml --dry-run
+python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml --dry-run
 
-# Candidate 2: uniform GPTQ W4A16 GS32
-python behemoth_mixed_ptq.py SRC DST ../../Recipes/Datasets/General_reasoning.yaml \
-  --algorithm gptq --group-size 32
+# Candidate 2 was GPTQ GS32: KLD 0.046951, rejected.
 
-# Candidate 3: AWQ then GPTQ, GS32
-python behemoth_mixed_ptq.py SRC DST ../../Recipes/Datasets/General_reasoning.yaml \
-  --algorithm awq_gptq --group-size 32 --use-loss-mask
+# Candidate 3: AutoRound W4A16 GS32, same 512 samples as baseline.
+python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \
+  --algorithm autoround --group-size 32 \
+  --autoround-iters 200 --autoround-batch-size 1 \
+  --autoround-device-ids auto --skip-sample-gen
 
-# Mixed: GS128 + a few W8 down_proj layers
-python behemoth_mixed_ptq.py SRC DST ../../Recipes/Datasets/General_reasoning.yaml \
-  --algorithm awq_gptq --group-size 128 \
-  --promote-down-proj-layers 0,1,87 \
-  --policy-yaml recipes/policy_example.yaml
+# Candidate 4: canonical asymmetric AWQ GS32, same calibration.
+python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \
+  --algorithm awq --group-size 32 --asymmetric --skip-sample-gen
 ```
 
 `--max-disk-gib 70` is enforced before `from_pretrained`.
 
+AutoRound uses the official llm-compressor `AutoRoundModifier` and saves
+compressed-tensors directly. AutoRound **0.13.0 or newer** is required for
+W4A16 compressed-tensors export. Verify it before the long run:
+
+```bash
+python -c "import auto_round; print(auto_round.__version__)"
+```
+
 ## KLD
 
-Score against `ref_logits_Behemoth-R1-123B-v2_ctx2048_s512` in the vLLM env. The GS32 baseline to beat is **mean KLD 0.042380**. Finish `W4A16_GS32_AWQMSK` before ranking new runs.
+Score against `ref_logits_Behemoth-R1-123B-v2_ctx2048_s512` in the vLLM env. The GS32 baseline to beat is **mean KLD 0.042380**. Finish `W4A16_GS32_AWQMSK` before ranking new runs. Do not start mixed W4/W8 promotion until the best uniform AutoRound/AWQ recipe is known.

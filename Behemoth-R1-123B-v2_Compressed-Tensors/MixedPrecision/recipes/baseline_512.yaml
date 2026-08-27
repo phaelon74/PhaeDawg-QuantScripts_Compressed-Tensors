@@ -1,0 +1,20 @@
+# Exact calibration composition used by the original W4A16_GS32 baseline.
+# Keep this fixed while comparing quantization algorithms.
+calibration_set:
+  max_seq_length: 2048
+  shuffle: false
+  seed: 42
+  datasets:
+    - dataset: neuralmagic/LLM_compression_calibration
+      split: train
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 307
+      seed: 42
+
+    - dataset: Rombo-Org/Optimized_Reasoning
+      split: train
+      columns: [instruction, input, output]
+      formatter: rombo_reasoning
+      num_samples: 205
+      seed: 43

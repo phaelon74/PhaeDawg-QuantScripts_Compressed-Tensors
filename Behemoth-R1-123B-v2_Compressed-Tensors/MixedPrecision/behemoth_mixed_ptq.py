@@ -2,7 +2,7 @@
 Behemoth-R1-123B-v2 mixed W4A16 / W8A16 PTQ harness.
 
   - llm-compressor oneshot, compressed-tensors save
-  - Algorithms: gptq | awq | awq_gptq
+  - Algorithms: autoround | awq | gptq | awq_gptq
   - Optional W8 promotions via regex or down_proj layer indices
   - Packed-size preflight (rejects > --max-disk-gib)
   - Calibration from Recipes/Datasets/*.yaml
@@ -10,15 +10,16 @@ Behemoth-R1-123B-v2 mixed W4A16 / W8A16 PTQ harness.
 Run in the llm-compressor venv, not the vLLM KLD venv.
 
 Examples:
-  python behemoth_mixed_ptq.py SRC DST ../../Recipes/Datasets/General_reasoning.yaml --dry-run
-  python behemoth_mixed_ptq.py SRC DST ../../Recipes/Datasets/General_reasoning.yaml \\
-      --algorithm gptq --group-size 32
-  python behemoth_mixed_ptq.py SRC DST ../../Recipes/Datasets/General_reasoning.yaml \\
-      --algorithm awq_gptq --group-size 128 --promote-down-proj-layers 0,1,87
+  python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml --dry-run
+  python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \\
+      --algorithm autoround --group-size 32 --autoround-batch-size 1
+  python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \\
+      --algorithm awq --group-size 32 --asymmetric
 """
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
 import shutil
@@ -264,6 +265,27 @@ def format_prompt_answer(example, columns, tokenizer, use_loss_mask=False):
     return {"text": text}
 
 
+def format_rombo_reasoning(example, columns, tokenizer, use_loss_mask=False):
+    """Match the original Behemoth GS32 instruction + multi-turn formatter."""
+    instruction = example.get(columns[0], "")
+    raw_inputs = example.get(columns[1], [])
+    raw_outputs = example.get(columns[2], [])
+    inputs = raw_inputs if isinstance(raw_inputs, list) else [raw_inputs]
+    outputs = raw_outputs if isinstance(raw_outputs, list) else [raw_outputs]
+
+    messages = [{"role": "system", "content": str(instruction)}]
+    for i in range(max(len(inputs), len(outputs))):
+        if i < len(inputs) and inputs[i]:
+            messages.append({"role": "user", "content": str(inputs[i])})
+        if i < len(outputs) and outputs[i]:
+            messages.append({"role": "assistant", "content": str(outputs[i])})
+
+    text = messages_to_text(tokenizer, messages)
+    if use_loss_mask:
+        return {"text": text, "messages": json.dumps(messages)}
+    return {"text": text}
+
+
 def format_chat_completion(example, columns, tokenizer, use_loss_mask=False):
     for col in columns:
         if col not in example:
@@ -304,6 +326,7 @@ def format_raw_text(example, columns, _tokenizer, use_loss_mask=False):
 FORMATTERS = {
     "sharegpt": format_sharegpt,
     "prompt_answer": format_prompt_answer,
+    "rombo_reasoning": format_rombo_reasoning,
     "chat_completion": format_chat_completion,
     "raw_text": format_raw_text,
 }
@@ -333,6 +356,7 @@ def load_calibration(recipe_yaml, tokenizer, seed, shuffle, max_seq_length, use_
         formatter_name = ds_config.get("formatter", "raw_text")
         num_samples = ds_config.get("num_samples", 10)
         streaming = ds_config.get("streaming", False)
+        dataset_seed = int(ds_config.get("seed", seed))
         load_kw = {}
         if subset:
             load_kw["name"] = subset
@@ -349,7 +373,7 @@ def load_calibration(recipe_yaml, tokenizer, seed, shuffle, max_seq_length, use_
             else:
                 part = load_dataset(dataset_name, split=split, **load_kw)
                 n = min(num_samples, len(part))
-                part = part.shuffle(seed=seed).select(range(n))
+                part = part.shuffle(seed=dataset_seed).select(range(n))
             formatter_fn = FORMATTERS.get(formatter_name, format_raw_text)
             part = part.map(
                 lambda x, c=columns, t=tokenizer, u=use_loss_mask, f=formatter_fn: f(
@@ -441,6 +465,31 @@ def build_recipe(args, inv, bits_map):
     groups, ignore = groups_from_bits(
         inv, bits_map, args.group_size, not args.asymmetric
     )
+    if args.algorithm == "autoround":
+        from packaging.version import Version
+
+        installed = importlib.metadata.version("auto-round")
+        if Version(installed) < Version("0.13.0"):
+            raise RuntimeError(
+                "AutoRound >= 0.13.0 is required for W4A16 compressed-tensors "
+                f"export; found {installed}."
+            )
+        print(f"AutoRound version: {installed}")
+        from llmcompressor.modifiers.autoround import AutoRoundModifier
+
+        return [
+            AutoRoundModifier(
+                ignore=ignore,
+                config_groups=groups,
+                iters=args.autoround_iters,
+                batch_size=args.autoround_batch_size,
+                lr=args.autoround_lr,
+                device_ids=args.autoround_device_ids,
+                enable_torch_compile=not args.disable_torch_compile,
+                disable_opt_rtn=args.autoround_disable_opt_rtn,
+            )
+        ]
+
     gptq_kw = dict(
         ignore=ignore,
         config_groups=groups,
@@ -500,7 +549,7 @@ def parse_args():
     )
     parser.add_argument(
         "--algorithm",
-        choices=("gptq", "awq", "awq_gptq"),
+        choices=("autoround", "awq", "gptq", "awq_gptq"),
         default=None,
     )
     parser.add_argument("--group-size", type=int, choices=(32, 64, 128), default=None)
@@ -512,6 +561,12 @@ def parse_args():
     parser.add_argument("--block-size", type=int, default=128)
     parser.add_argument("--actorder", default="static")
     parser.add_argument("--offload-hessians", action="store_true")
+    parser.add_argument("--autoround-iters", type=int, default=200)
+    parser.add_argument("--autoround-batch-size", type=int, default=1)
+    parser.add_argument("--autoround-lr", type=float, default=None)
+    parser.add_argument("--autoround-device-ids", default="auto")
+    parser.add_argument("--autoround-disable-opt-rtn", action="store_true")
+    parser.add_argument("--disable-torch-compile", action="store_true")
     parser.add_argument("--use-loss-mask", action="store_true")
     parser.add_argument("--max-seq-length", type=int, default=None)
     parser.add_argument("--max-disk-gib", type=float, default=70.0)
@@ -620,6 +675,9 @@ def main() -> int:
         tokenizer=tokenizer,
         use_loss_mask=args.use_loss_mask,
     )
+    if args.algorithm == "autoround":
+        # Official AutoRound examples disable this for slightly better recovery.
+        oneshot_kwargs["shuffle_calibration_samples"] = False
     if args.use_loss_mask:
         oneshot_kwargs["pipeline"] = "sequential"
     if args.sequential_targets:
