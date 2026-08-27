@@ -53,12 +53,11 @@ The harness pads AutoRound calibration samples to exactly 2048 tokens and runs
 variable sequence lengths; errors such as `Expected size 2041 but got 2032`
 indicate an older copy of the harness.
 
-AutoRound uses `sequential_targets=["Linear"]` because SignSGD backward on a
-complete 123B decoder layer exceeds 96 GiB even at batch size 1. The harness
-includes a narrow compatibility patch for llm-compressor's Transformers 5.16
-cache bug: `PretrainedConfig` objects are retained as immutable metadata instead
-of recursively wrapping their strictly typed fields. No model tensor or
-quantization value is altered by this patch.
+AutoRound splits sequential tuning at `MistralAttention` and `MistralMLP`.
+SignSGD backward on a complete 123B decoder layer exceeds 96 GiB even at batch
+size 1, while an individual `Linear` is not a valid FX boundary for this
+Transformers graph (`args` is forwarded incorrectly). Natural attention/MLP
+sub-blocks keep both paths tuned while reducing peak memory.
 
 ## KLD
 
