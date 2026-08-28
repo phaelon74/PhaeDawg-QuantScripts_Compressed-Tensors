@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "projectName": "Behemoth-R1-123B-v2-EXL3",
+  "resultsBasename": "Behemoth-R1-123B-v2-EXL3-3p5-H6",
+  "outputDirectory": "/home/phaedawg/KLD_Scripts/output",
+  "vllmRepositoryRoot": "/home/phaedawg/vllm",
+  "scoreModeKldRelativePath": "examples/offline_inference/score_mode_kld.py",
+  "dataset": "wikitext",
+  "datasetConfig": "wikitext-2-raw-v1",
+  "tensorParallelSize": 4,
+  "gpuMemoryUtilization": 0.90,
+  "defaultReferenceLogitsDir": "/home/phaedawg/kld-nightly-vllm/kld-vllm/ref_logits_Behemoth-R1-123B-v2_ctx2048_s512",
+  "modelsRoot": "/media/fmodels",
+  "downloadIfMissing": false,
+  "cleanupDownloadedModelAfterSuccess": false,
+  "runKldOnBaseModel": false,
+  "models": [
+    {
+      "id": "Behemoth-R1-123B-v2-EXL3-3p5-H6",
+      "isBase": false,
+      "huggingfaceId": null,
+      "localPath": "/media/fmodels/ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3/3.5bpw_H6",
+      "referenceMode": "logits",
+      "referenceLogitsPath": "/home/phaedawg/kld-nightly-vllm/kld-vllm/ref_logits_Behemoth-R1-123B-v2_ctx2048_s512",
+      "referenceModelPath": null,
+      "quantization": "exl3",
+      "enforceEager": true,
+      "qualityGateMaxMeanKld": 0.042380,
+      "stretchMeanKld": 0.034004
+    }
+  ]
+}

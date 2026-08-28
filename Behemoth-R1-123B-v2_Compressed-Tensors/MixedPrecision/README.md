@@ -6,10 +6,9 @@ KLD scoring stays in the vLLM venv. This harness runs in the **llm-compressor** 
 
 ## Size rule
 
-AutoRound GS32 is the fixed donor configuration. The 69.5 GiB mixed policy
-improved KLD from 0.037094 to 0.035669. Research tiers at 72, 74, and 76 GiB
-measure the marginal accuracy return from additional W8 promotions. Treat 76
-GiB as the exploratory ceiling until TP=4 32K-context memory is revalidated.
+AutoRound GS32 is the fixed donor configuration. The 72 GiB mixed policy
+is the frozen accuracy winner at mean KLD 0.034004. Further W4/W8 mixed
+expansion is paused in favor of the EXL3 SM86 workstream.
 
 Preflight (config.json only, no weight load):
 

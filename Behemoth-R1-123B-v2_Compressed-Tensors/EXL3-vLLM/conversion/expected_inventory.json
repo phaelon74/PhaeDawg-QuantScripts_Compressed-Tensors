@@ -1,0 +1,24 @@
+{
+  "model": "TheDrummer/Behemoth-R1-123B-v2",
+  "layers": 88,
+  "decoder_linear_payloads": 616,
+  "head": {"name": "lm_head", "bitrate": 6, "codebook": "mul1"},
+  "decoder": {
+    "target_bpw": 3.5,
+    "codebook": "mul1",
+    "expected_bitrates": [3, 4],
+    "projections_per_layer": [
+      "self_attn.q_proj",
+      "self_attn.k_proj",
+      "self_attn.v_proj",
+      "self_attn.o_proj",
+      "mlp.gate_proj",
+      "mlp.up_proj",
+      "mlp.down_proj"
+    ]
+  },
+  "unquantized": ["embed_tokens", "input_layernorm", "post_attention_layernorm", "norm"],
+  "size_note": "Expect roughly the low-50-GiB range. Verify with du -sb, do not assume.",
+  "tensor_storage": "required",
+  "calibration": {"rows": 512, "cols": 2048}
+}

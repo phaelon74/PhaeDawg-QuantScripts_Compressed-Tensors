@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "arch": "sm86",
+  "note": "Per-shape reconstruct crossover. Do not copy the GLM/SM120 default of 144. Fill from scripts/kernel_microbench.py on RTX 3090.",
+  "default_m": 144,
+  "fused_reconstruct_m": 1024,
+  "thresholds": [
+    {"k": 12288, "n": 3072, "bitrate": 3, "m": null, "layer": "q_proj"},
+    {"k": 12288, "n": 256, "bitrate": 3, "m": null, "layer": "k_proj"},
+    {"k": 12288, "n": 256, "bitrate": 3, "m": null, "layer": "v_proj"},
+    {"k": 3072, "n": 12288, "bitrate": 3, "m": null, "layer": "o_proj"},
+    {"k": 12288, "n": 7168, "bitrate": 3, "m": null, "layer": "gate_proj"},
+    {"k": 12288, "n": 7168, "bitrate": 3, "m": null, "layer": "up_proj"},
+    {"k": 7168, "n": 12288, "bitrate": 3, "m": null, "layer": "down_proj"},
+    {"k": 12288, "n": 3072, "bitrate": 4, "m": null, "layer": "q_proj"},
+    {"k": 12288, "n": 256, "bitrate": 4, "m": null, "layer": "k_proj"},
+    {"k": 12288, "n": 256, "bitrate": 4, "m": null, "layer": "v_proj"},
+    {"k": 3072, "n": 12288, "bitrate": 4, "m": null, "layer": "o_proj"},
+    {"k": 12288, "n": 7168, "bitrate": 4, "m": null, "layer": "gate_proj"},
+    {"k": 12288, "n": 7168, "bitrate": 4, "m": null, "layer": "up_proj"},
+    {"k": 7168, "n": 12288, "bitrate": 4, "m": null, "layer": "down_proj"},
+    {"k": 12288, "n": 8192, "bitrate": 6, "m": null, "layer": "lm_head", "note": "H6 has no Ampere INT8 GEMV path (K<=5)."}
+  ]
+}

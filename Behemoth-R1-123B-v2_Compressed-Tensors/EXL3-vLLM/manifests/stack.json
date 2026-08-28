@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "name": "exl3-sm86-vllm",
+  "status": "pin-template",
+  "captured_at": null,
+  "host": null,
+  "notes": [
+    "Fill this file by running scripts/capture_manifest.sh inside ~/kld-nightly-vllm on the Linux GPU host.",
+    "Do not treat the SHA prefixes below as a substitute for the full captured values."
+  ],
+  "vllm": {
+    "package": "vllm",
+    "reported_version": "0.1.dev12995+g1f369db5d",
+    "source_sha_prefix": "1f369db5d",
+    "source_sha_full": "1f369db5d5680355e8909df56e77592c55ebdbf9",
+    "install_path": "/home/phaedawg/EXL3-Behemoth/kld-vllm",
+    "python_package_location": null,
+    "note": "d011sd02 host pin: local KLD-patched vLLM tree, not upstream 0.23.1rc1."
+  },
+  "python": {
+    "implementation": "CPython",
+    "version": null,
+    "abi": null,
+    "executable": "/home/phaedawg/EXL3-Behemoth/venv/exl3-vllm/bin/python"
+  },
+  "torch": {
+    "version": "2.9.1+cu130",
+    "cuda_compiled": "13.0",
+    "cxx11_abi": null
+  },
+  "cuda": {
+    "toolkit": "13.0",
+    "driver": "580.173.02",
+    "nvcc": null
+  },
+  "compiler": {
+    "cxx": null,
+    "cxx_version": null,
+    "nvcc_host_compiler": null
+  },
+  "exllamav3": {
+    "repo": "https://github.com/turboderp-org/exllamav3",
+    "license": "MIT",
+    "pinned_commit": "0c49587a7c235e6303a6bbedc8b665272ad3a2ea",
+    "pin_note": "Implementation-time master snapshot. Re-record the exact built SHA after scripts/build_exllamav3_ext.sh.",
+    "conversion_env": "~/exllamav3-convert",
+    "runtime_artifact": "exllamav3_ext only, built against the vLLM Torch/CUDA/Python ABI",
+    "arch_list": "8.6",
+    "native_sass": true,
+    "build_isolation": false
+  },
+  "gpu_serving_target": {
+    "count": 4,
+    "model": "NVIDIA GeForce RTX 3090",
+    "sm": "8.6",
+    "vram_gib_each": 24,
+    "physical_ids": [1, 2, 3, 4],
+    "logical_ids": [0, 1, 2, 3],
+    "tensor_parallel": 4,
+    "clocks": null,
+    "power_limits_w": null,
+    "topology": null
+  },
+  "gpu_quantization": {
+    "physical_id": 0,
+    "note": "GPU 0 is reserved for conversion / quantization. Serving uses physical 1-4."
+  },
+  "plugin": {
+    "package": "vllm-exl3-sm86",
+    "entry_point": "vllm.general_plugins:vllm_exl3_sm86",
+    "quantization_name": "exl3"
+  }
+}

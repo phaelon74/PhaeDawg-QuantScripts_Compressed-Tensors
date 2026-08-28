@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-exl3-sm86"
+version = "0.1.0"
+description = "Dense EXL3 quantization plugin for vLLM on SM86 (Ampere)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "PhaeDawg QuantScripts" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+]
+dependencies = []
+
+[project.entry-points."vllm.general_plugins"]
+vllm_exl3_sm86 = "vllm_exl3_sm86:register"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]

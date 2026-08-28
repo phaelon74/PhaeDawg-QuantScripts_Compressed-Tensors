@@ -1,0 +1,3 @@
+https://github.com/turboderp-org/exllamav3
+commit=0c49587a7c235e6303a6bbedc8b665272ad3a2ea
+license=MIT

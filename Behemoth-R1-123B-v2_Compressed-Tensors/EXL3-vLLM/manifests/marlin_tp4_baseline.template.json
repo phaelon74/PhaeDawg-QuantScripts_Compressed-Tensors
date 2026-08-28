@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "backend": "compressed-tensors Marlin",
+  "checkpoint": "/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/AutoRound_GS32_Mixed_72G",
+  "launch_script": "VLLM-Launch_Scripts/behemoth123b-r1-v2.sh",
+  "serving": {
+    "tp": 4,
+    "gpus": "physical 1,2,3,4 as logical 0,1,2,3",
+    "max_model_len": 54272,
+    "kv_cache_dtype": "auto",
+    "max_num_batched_tokens": 8192,
+    "cudagraph_capture_sizes": [1, 2, 4]
+  },
+  "metrics_required": [
+    "ttft_ms",
+    "prefill_tok_s",
+    "decode_tok_s",
+    "tpot_p50_ms",
+    "tpot_p95_ms",
+    "tpot_p99_ms",
+    "itl_p50_ms",
+    "itl_p95_ms",
+    "itl_p99_ms",
+    "peak_vram_gib_per_rank",
+    "max_context_bf16_kv"
+  ],
+  "concurrency": {
+    "1": null,
+    "2": null,
+    "4": null
+  },
+  "prompt_lengths": [128, 1024, 4096, 8192, 16384, 32768],
+  "decode_tokens": 256,
+  "notes": "Populate by running scripts/capture_marlin_baseline.sh on the 4x3090 box. This file stays a template until that host run exists."
+}

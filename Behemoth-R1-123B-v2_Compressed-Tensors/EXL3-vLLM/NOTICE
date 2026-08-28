@@ -1,0 +1,9 @@
+ExLlamaV3 (https://github.com/turboderp-org/exllamav3) is MIT-licensed.
+This workstream vendors no ExLlamaV3 sources. The vLLM plugin talks to a
+pinned `exllamav3_ext` build. Keep the conversion environment and the vLLM
+runtime environment separate.
+
+Dense EXL3 vLLM glue is adapted from the dense subset of
+https://github.com/local-inference-lab/vllm/pull/139 (Apache-2.0).
+SparkInfer, routed MoE, GLM/DeepSeek, MLA/DCP, MTP, and rank-sliced expert
+paths are intentionally not ported.

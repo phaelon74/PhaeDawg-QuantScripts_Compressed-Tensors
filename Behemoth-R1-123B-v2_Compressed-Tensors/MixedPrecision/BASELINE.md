@@ -43,19 +43,18 @@ Use ModelOpt only for sensitivity ranking until a TP=4 mixed checkpoint loads in
 | `/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/Candidate2` | 66G | 0.046951 (204700 positions; GPTQ GS32; rejected) |
 | `/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/Candidate3_AutoRound_GS32` | 66G | 0.037094 (204700 positions) |
 | GS128 AutoRound mixed candidate | pending exact path/size | 0.043462 (204700 positions; rejected) |
-| `/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/AutoRound_GS32_Mixed_69p5G` | 70G rounded | **0.035669** (204700 positions; current winner) |
+| `/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/AutoRound_GS32_Mixed_69p5G` | 70G rounded | 0.035669 (204700 positions) |
+| `/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/AutoRound_GS32_Mixed_72G` | 72G rounded | **0.034004** (204700 positions; current winner; 605.23 pos/s) |
 
 Reference logits: `~/kld-nightly-vllm/kld-vllm/ref_logits_Behemoth-R1-123B-v2_ctx2048_s512/` (25G).
 
-The 72/74/76 GiB research tiers measure marginal KLD improvement beyond the
-current winner. Each candidate must remain loadable at TP=4 with ≥32K BF16 KV
-on the 3090 box; 76 GiB is the exploratory ceiling until that gate is rerun.
+The 72 GiB mixed AutoRound GS32 checkpoint is the frozen accuracy reference for
+the EXL3 workstream. Record exact bytes with `du -sb`; `du -sh` reports the
+rounded value `72G`. Further W4/W8 mixed expansion is paused.
 
 Candidate3 established AutoRound GS32 as the fixed donor configuration. The
-69.5 GiB mixed policy improved KLD by 3.84% relative to Candidate3 and is the
-current accuracy winner. The GS128 result is rejected; its W8 capacity did not
-offset the accuracy loss from coarser W4 groups. Do not spend another full run
-on GS128, AWQ, or pure GPTQ.
+GS128 result is rejected; its W8 capacity did not offset the accuracy loss from
+coarser W4 groups. Do not spend another full run on GS128, AWQ, or pure GPTQ.
 
 Mixed checkpoints must be quantized from the BF16 source in one AutoRound run:
 GS32 W4 for the default scheme and GS32 W8 for selected modules. Do not attempt

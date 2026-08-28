@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "status": "template",
+  "unsupported": [
+    "SparkInfer / routed MoE",
+    "GLM / DeepSeek loaders",
+    "MLA / DCP / MTP",
+    "rank-sliced experts",
+    "sleep mode",
+    "state_dict resave",
+    "CUDA graphs until VLLM_EXL3_ALLOW_GRAPHS=1 and prewarm receipts exist",
+    "added-vocab quantized lm_head"
+  ],
+  "rollback": [
+    "Keep serving the mixed AutoRound GS32 72G Marlin checkpoint.",
+    "Unset VLLM_PLUGINS or install without the exl3 plugin.",
+    "Launch VLLM-Launch_Scripts/behemoth123b-r1-v2.sh with QUANTIZATION=compressed-tensors."
+  ],
+  "pins": {
+    "vllm": "0.1.dev12995+g1f369db5d (1f369db5d, kld-vllm tree)",
+    "plugin": "vllm-exl3-sm86==0.1.0",
+    "exllamav3": "0c49587a7c235e6303a6bbedc8b665272ad3a2ea"
+  },
+  "receipts": {
+    "stack": "manifests/stack.captured.json",
+    "marlin_baseline": "manifests/marlin_tp4_baseline.captured.json",
+    "kernel_microbench": "results/kernel_microbench.json",
+    "kld": "KLD results from scripts/run_kld_exl3.sh",
+    "prewarm": "results/prewarm.json",
+    "crossover": "manifests/sm86_crossover.json"
+  },
+  "maintenance": {
+    "rebase_order": ["plugin", "exllamav3_ext", "vllm"],
+    "patch_policy": "manifests/patches/README.md"
+  }
+}
