@@ -4,6 +4,16 @@ from __future__ import annotations
 
 MCG_SENTINEL = 0xCBAC1FED
 MUL1_SENTINEL = 0x83DCD12D
+
+
+def int32_sentinel(value: int) -> "torch.Tensor":
+    """Pack a uint32 EXL3 marker into signed int32 without Python overflow."""
+    import torch
+
+    wrapped = value - (1 << 32) if value >= (1 << 31) else value
+    return torch.tensor([wrapped], dtype=torch.int32)
+
+
 HADAMARD_BLOCK = 128
 TRELLIS_TILE = 16
 MIN_BITRATE = 1

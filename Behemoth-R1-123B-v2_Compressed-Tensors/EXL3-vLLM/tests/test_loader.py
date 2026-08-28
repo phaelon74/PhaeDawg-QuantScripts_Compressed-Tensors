@@ -8,6 +8,7 @@ import torch
 pytest.importorskip("vllm")
 
 from vllm_exl3_sm86.config import Exl3Config
+from vllm_exl3_sm86.constants import MUL1_SENTINEL, int32_sentinel
 from vllm_exl3_sm86.linear import Exl3LinearMethod
 from vllm_exl3_sm86.parameter import Exl3Parameter, exl3_weight_loader
 from vllm_exl3_sm86.slicing import ShardId
@@ -17,7 +18,7 @@ def _make_payload(k: int, n: int, bitrate: int = 3):
     trellis = torch.zeros((k // 16, n // 16, 16 * bitrate), dtype=torch.int16)
     suh = torch.ones(k, dtype=torch.float16)
     svh = torch.ones(n, dtype=torch.float16)
-    mul1 = torch.tensor([0x83DCD12D], dtype=torch.int32)
+    mul1 = int32_sentinel(MUL1_SENTINEL)
     return trellis, suh, svh, mul1
 
 

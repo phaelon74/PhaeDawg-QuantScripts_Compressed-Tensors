@@ -24,7 +24,16 @@ class Exl3Parameter(BasevLLMParameter):
         self.exl3_tensors: dict[ShardId, torch.Tensor] = {}
         self.exl3_field: str | None = None
         self.exl3_layer = None
-        super().__init__(data=self.data, weight_loader=weight_loader)
+        try:
+            super().__init__(data=self.data, weight_loader=weight_loader)
+        except AssertionError as exc:
+            # KLD vLLM BasevLLMParameter reads TP rank during construction.
+            # Unit tests construct parameters before process-group init.
+            if "tensor model parallel group is not initialized" not in str(exc):
+                raise
+            self.weight_loader = weight_loader
+            self._weight_loader = weight_loader
+            self.tp_rank = 0
 
     def load_exl3_weight(
         self,

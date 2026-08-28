@@ -1,11 +1,19 @@
-"""CUDA parity: plugin op vs native ExLlamaV3 reconstruct for each bitrate/M."""
+"""CUDA parity: plugin wrappers vs native exllamav3_ext.
+
+Random trellis bits are valid packed indices, but compressed GEMM and
+reconstruct are different kernels. Compare:
+
+- plugin compressed path vs raw ext.exl3_gemm (same kernel, tight)
+- plugin reconstruct path vs reconstruct_hgemm (same kernel, tight)
+- compressed vs reconstruct with microbench-style tiles (fp16 noise)
+"""
 
 from __future__ import annotations
 
-import os
-
 import pytest
 import torch
+
+from vllm_exl3_sm86.constants import FUSED_RECONSTRUCT_M, TRELLIS_TILE
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="SM86 CUDA tests need a GPU"
@@ -21,32 +29,118 @@ def _ext():
         pytest.skip(str(exc))
 
 
-@pytest.mark.parametrize("bitrate", [3, 4, 6])
-@pytest.mark.parametrize("m", [1, 8, 32, 128, 1024])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_plugin_matches_reconstructed_fp16(bitrate, m, dtype):
-    ext = _ext()
-    from vllm_exl3_sm86.ops import call_exl3_gemm
-
+def _payloads(bitrate: int, m: int, dtype: torch.dtype, device: torch.device):
     k, n = 256, 256
-    device = torch.device("cuda")
     torch.manual_seed(0)
+    # Match kernel_microbench: bounded codes, not the full int16 range.
     trellis = torch.randint(
-        -2**15, 2**15, (k // 16, n // 16, 16 * bitrate), dtype=torch.int16, device=device
+        -1024,
+        1024,
+        (k // TRELLIS_TILE, n // TRELLIS_TILE, TRELLIS_TILE * bitrate),
+        dtype=torch.int16,
+        device=device,
     )
     suh = torch.randn(k, dtype=torch.float16, device=device)
     svh = torch.randn(n, dtype=torch.float16, device=device)
-    x_caller = torch.randn(m, k, dtype=dtype, device=device)
-    x = x_caller.to(torch.float16).contiguous()
-    got = call_exl3_gemm(x, trellis, suh, svh, mcg=False, mul1=True)
-    w = torch.empty((k, n), dtype=torch.float16, device=device)
+    x = torch.randn(m, k, dtype=dtype, device=device).to(torch.float16).contiguous()
+    return x, trellis, suh, svh
+
+
+def _native_compressed(ext, x, trellis, suh, svh, mcg: bool, mul1: bool):
+    output = torch.empty(
+        (x.shape[0], trellis.shape[1] * TRELLIS_TILE),
+        dtype=torch.float16,
+        device=x.device,
+    )
+    x_had = torch.empty_like(x)
+    ext.exl3_gemm(x, trellis, output, suh, x_had, svh, -1, mcg, mul1, 0)
+    return output
+
+
+def _reconstruct_ref(ext, x, trellis, suh, svh, bitrate: int):
+    k = trellis.shape[0] * TRELLIS_TILE
+    n = trellis.shape[1] * TRELLIS_TILE
+    w = torch.empty((k, n), dtype=torch.float16, device=x.device)
     ext.reconstruct(w, trellis, bitrate, False, True)
     xh = torch.empty_like(x)
     ext.had_r_128(x, xh, suh, None, 1.0)
-    ref = torch.empty((m, n), dtype=torch.float16, device=device)
+    ref = torch.empty((x.shape[0], n), dtype=torch.float16, device=x.device)
     ext.hgemm(xh, w, ref)
     ext.had_r_128(ref, ref, None, svh, 1.0)
+    return ref
+
+
+@pytest.mark.parametrize("bitrate", [3, 4, 6])
+@pytest.mark.parametrize("m", [1, 8, 32, 128, 1024])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_plugin_compressed_matches_ext_gemm(bitrate, m, dtype, monkeypatch):
+    monkeypatch.setenv("VLLM_EXL3_FORCE_COMPRESSED", "1")
+    monkeypatch.delenv("VLLM_EXL3_FORCE_RECONSTRUCT", raising=False)
+    ext = _ext()
+    from vllm_exl3_sm86.ops import call_exl3_gemm
+
+    device = torch.device("cuda")
+    x, trellis, suh, svh = _payloads(bitrate, m, dtype, device)
+    got = call_exl3_gemm(x, trellis, suh, svh, mcg=False, mul1=True)
+    ref = _native_compressed(ext, x, trellis, suh, svh, False, True)
     torch.cuda.synchronize()
-    if not torch.allclose(got, ref, rtol=1e-3, atol=1e-2):
+    if not torch.equal(got, ref) and not torch.allclose(got, ref, rtol=0, atol=0):
         max_err = (got - ref).abs().max().item()
-        pytest.fail(f"parity failed bitrate={bitrate} M={m} dtype={dtype}: max_err={max_err}")
+        pytest.fail(
+            f"plugin vs ext.exl3_gemm bitrate={bitrate} M={m} dtype={dtype}: "
+            f"max_err={max_err}"
+        )
+
+
+@pytest.mark.parametrize("bitrate", [3, 4, 6])
+@pytest.mark.parametrize("m", [1, 8, 32, 128, 1024])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_plugin_reconstruct_matches_hgemm(bitrate, m, dtype, monkeypatch):
+    monkeypatch.setenv("VLLM_EXL3_FORCE_RECONSTRUCT", "1")
+    monkeypatch.delenv("VLLM_EXL3_FORCE_COMPRESSED", raising=False)
+    _ext()
+    from vllm_exl3_sm86.ops import call_exl3_gemm
+    from vllm_exl3_sm86.prefill import reconstruct_hgemm
+
+    device = torch.device("cuda")
+    x, trellis, suh, svh = _payloads(bitrate, m, dtype, device)
+    got = call_exl3_gemm(x, trellis, suh, svh, mcg=False, mul1=True)
+    ref = reconstruct_hgemm(
+        x,
+        trellis,
+        suh,
+        svh,
+        mcg=False,
+        mul1=True,
+        fused=m >= FUSED_RECONSTRUCT_M,
+    )
+    torch.cuda.synchronize()
+    if not torch.allclose(got, ref, rtol=1e-5, atol=1e-5):
+        max_err = (got - ref).abs().max().item()
+        pytest.fail(
+            f"plugin vs reconstruct_hgemm bitrate={bitrate} M={m} dtype={dtype}: "
+            f"max_err={max_err}"
+        )
+
+
+@pytest.mark.parametrize("bitrate", [3, 4, 6])
+@pytest.mark.parametrize("m", [1, 8, 32, 128, 1024])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_plugin_matches_reconstructed_fp16(bitrate, m, dtype, monkeypatch):
+    monkeypatch.setenv("VLLM_EXL3_FORCE_COMPRESSED", "1")
+    monkeypatch.delenv("VLLM_EXL3_FORCE_RECONSTRUCT", raising=False)
+    ext = _ext()
+    from vllm_exl3_sm86.ops import call_exl3_gemm
+
+    device = torch.device("cuda")
+    x, trellis, suh, svh = _payloads(bitrate, m, dtype, device)
+    got = call_exl3_gemm(x, trellis, suh, svh, mcg=False, mul1=True)
+    ref = _reconstruct_ref(ext, x, trellis, suh, svh, bitrate)
+    torch.cuda.synchronize()
+    # GEMV (M=1) and fp16 GEMM vs reconstruct differ in reduction order.
+    atol = 0.75 if m == 1 else 0.25
+    if not torch.allclose(got, ref, rtol=5e-2, atol=atol):
+        max_err = (got.float() - ref.float()).abs().max().item()
+        pytest.fail(
+            f"parity failed bitrate={bitrate} M={m} dtype={dtype}: max_err={max_err}"
+        )

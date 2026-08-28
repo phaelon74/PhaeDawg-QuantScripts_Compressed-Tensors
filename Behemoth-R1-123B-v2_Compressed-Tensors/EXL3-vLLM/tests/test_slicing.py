@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from vllm_exl3_sm86.constants import MUL1_SENTINEL
+from vllm_exl3_sm86.constants import MUL1_SENTINEL, int32_sentinel
 from vllm_exl3_sm86.slicing import (
     qkv_output_start,
     slice_trellis,
@@ -51,7 +51,7 @@ def test_qkv_kv_head_replication():
 
 
 def test_markers_are_independent_scalars():
-    mul1 = torch.tensor([MUL1_SENTINEL], dtype=torch.int32)
+    mul1 = int32_sentinel(MUL1_SENTINEL)
     assert mul1.numel() == 1
     assert int(mul1.item()) & 0xFFFFFFFF == MUL1_SENTINEL
 

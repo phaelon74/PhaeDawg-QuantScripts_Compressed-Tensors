@@ -30,15 +30,32 @@ PY
 pip install --no-build-isolation --no-deps -e "$SRC"
 
 mkdir -p "$OUT"
-python3 - <<PY
-import exllamav3_ext, pathlib, shutil, os
+python3 - <<'PY'
+import os
+import pathlib
+import shutil
+
+import torch  # load libc10 / libtorch before the extension
+
+torch_lib = pathlib.Path(torch.__file__).resolve().parent / "lib"
+os.environ["LD_LIBRARY_PATH"] = str(torch_lib) + (
+    os.pathsep + os.environ["LD_LIBRARY_PATH"] if os.environ.get("LD_LIBRARY_PATH") else ""
+)
+
+import exllamav3_ext
+
 src = pathlib.Path(exllamav3_ext.__file__).resolve()
-dst_dir = pathlib.Path(os.environ.get("EXLLAMAV3_EXT_OUT", r"$OUT"))
+dst_dir = pathlib.Path(os.environ["EXLLAMAV3_EXT_OUT"])
 dst_dir.mkdir(parents=True, exist_ok=True)
+copied = 0
 for path in src.parent.glob("exllamav3_ext*"):
     shutil.copy2(path, dst_dir / path.name)
     print("copied", path, "->", dst_dir / path.name)
+    copied += 1
+if copied == 0:
+    raise SystemExit(f"no exllamav3_ext* next to {src}")
 print("exllamav3_ext", src)
+print("torch_lib", torch_lib)
 PY
 
 echo "Set VLLM_EXL3_EXT_PATH=$OUT before launching vLLM."

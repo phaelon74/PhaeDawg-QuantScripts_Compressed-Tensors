@@ -271,9 +271,10 @@ to `$EXL3/build/exllamav3_ext`.
 ```bash
 export VLLM_EXL3_EXT_PATH="$EXL3/build/exllamav3_ext"
 pip install -e "$EXL3/plugin"
+pip install pytest
 export VLLM_PLUGINS=vllm_exl3_sm86
 cd "$EXL3"
-pytest tests -q
+python -m pytest tests -q
 ```
 
 CPU tests should pass without the 123B checkpoint. CUDA tests skip until the
@@ -509,7 +510,7 @@ experimental memory-first and leave the 72G Marlin checkpoint in production.
 2. `$VENV_VLLM` already has Torch `2.9.1+cu130` and vLLM `1f369db5d`.
 3. `capture_manifest.sh` → `manifests/stack.captured.json`.
 4. Build `exllamav3_ext` with `TORCH_CUDA_ARCH_LIST=8.6`; `pip install -e plugin`.
-5. `pytest tests -q`.
+5. `pip install pytest` in `$VENV_VLLM`; `python -m pytest tests -q` (not system `pytest`).
 6. `kernel_microbench.py --fail-on-gate` on physical GPU 1. **Stop if it fails.**
 7. Populate `$VENV_CONVERT`; convert small Mistral on physical GPU 1.
 8. `validate_small_mistral.py --tp 1,4` on physical 1–4.

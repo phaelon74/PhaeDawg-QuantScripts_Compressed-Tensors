@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from .constants import PLUGIN_NAME, QUANTIZATION_NAME
-from .ops import register_custom_op
-from .version_guard import check_runtime
-
 
 def register() -> None:
     """Entry point for `vllm.general_plugins`."""
+    from .ops import register_custom_op
+    from .version_guard import check_runtime
+
     check_runtime(require_cuda=False)
     from vllm.model_executor.layers.quantization import register_quantization_config
 
