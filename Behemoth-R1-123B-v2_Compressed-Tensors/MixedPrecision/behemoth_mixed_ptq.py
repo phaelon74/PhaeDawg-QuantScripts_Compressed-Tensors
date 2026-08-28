@@ -20,14 +20,16 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import os
 from collections import defaultdict
 from contextlib import contextmanager
 import importlib
 import importlib.metadata
 import inspect
 import json
-import os
 import shutil
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import torch.nn as nn
 import yaml
@@ -667,7 +669,7 @@ def parse_args():
     parser.add_argument("--autoround-iters", type=int, default=200)
     parser.add_argument("--autoround-batch-size", type=int, default=1)
     parser.add_argument("--autoround-lr", type=float, default=None)
-    parser.add_argument("--autoround-device-ids", default="0,1,2,3")
+    parser.add_argument("--autoround-device-ids", default="0")
     parser.add_argument(
         "--autoround-gradient-accumulate-steps",
         type=int,

@@ -16,6 +16,8 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 import torch
 import yaml
 from safetensors import safe_open

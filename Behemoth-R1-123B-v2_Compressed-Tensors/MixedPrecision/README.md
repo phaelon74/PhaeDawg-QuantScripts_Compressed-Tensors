@@ -33,7 +33,7 @@ python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \
   --algorithm autoround --group-size 32 \
   --autoround-iters 200 --autoround-batch-size 1 \
   --autoround-gradient-accumulate-steps 8 --autoround-low-gpu-mem \
-  --autoround-device-ids 0,1,2,3 --skip-sample-gen
+  --autoround-device-ids 0 --skip-sample-gen
 
 # GS128, AWQ, and pure GPTQ branches are rejected. Continue with GS32 mixed
 # W4/W8 policies below.
@@ -41,6 +41,11 @@ python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \
 
 `--max-disk-gib` is enforced before `from_pretrained`; pass the tier ceiling
 explicitly for candidates above its conservative 70 GiB default.
+
+Both GPU-using scripts set `CUDA_VISIBLE_DEVICES=0` before importing PyTorch.
+AutoRound also defaults to device ID `0`, so the source model remains
+CPU-backed and only physical GPU 0 receives streamed block work. GPUs 1–3 stay
+available for other processes.
 
 AutoRound uses the official llm-compressor `AutoRoundModifier` and saves
 compressed-tensors directly. AutoRound **0.13.0 or newer** is required for
@@ -107,7 +112,7 @@ python behemoth_mixed_ptq.py SRC DST_MIXED_72 recipes/baseline_512.yaml \
   --max-disk-gib 72 \
   --autoround-iters 200 --autoround-batch-size 1 \
   --autoround-gradient-accumulate-steps 8 --autoround-low-gpu-mem \
-  --autoround-device-ids 0,1,2,3 --skip-sample-gen
+  --autoround-device-ids 0 --skip-sample-gen
 ```
 
 Repeat for `74g` and `76g`, changing both the policy and `--max-disk-gib`.
