@@ -27,7 +27,13 @@ def main() -> int:
         items = sorted(items, key=lambda r: r["m"])
         chosen = None
         for row in items:
-            if row["reconstruct_ms"] < row["exl3_ms"]:
+            exl3_ms = row.get("exl3_ms")
+            recon_ms = row.get("reconstruct_ms")
+            if exl3_ms is None or recon_ms is None:
+                continue
+            if exl3_ms != exl3_ms or recon_ms != recon_ms:  # NaN
+                continue
+            if recon_ms < exl3_ms:
                 chosen = row["m"]
                 break
         thresholds.append(

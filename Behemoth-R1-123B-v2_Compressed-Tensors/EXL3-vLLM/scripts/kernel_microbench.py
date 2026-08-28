@@ -112,6 +112,9 @@ def main() -> int:
         help="Correctness only; use after a full timing run.",
     )
     args = parser.parse_args()
+    default_out = str(ROOT / "results" / "kernel_microbench.json")
+    if args.skip_timing and args.output == default_out:
+        args.output = str(ROOT / "results" / "kernel_wrapper_check.json")
 
     if not torch.cuda.is_available():
         print("CUDA is required", file=sys.stderr)
