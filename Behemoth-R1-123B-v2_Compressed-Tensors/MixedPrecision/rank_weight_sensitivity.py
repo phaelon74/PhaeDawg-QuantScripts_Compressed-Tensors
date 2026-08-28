@@ -265,6 +265,7 @@ def write_policy(
     result: dict,
     selected: set[str],
     selected_units: list[dict],
+    added_units: list[dict],
 ) -> None:
     down_proj_names = {
         name for name in selected if name.endswith(".mlp.down_proj")
@@ -285,6 +286,14 @@ def write_policy(
             "w8_module_count": len(selected),
             "promotion_unit_count": len(selected_units),
             "promotion_units": [row["name"] for row in selected_units],
+            "selection_objective": "exact_nested_knapsack_sum_relative_gain",
+            "cumulative_proxy_utility": sum(
+                row["relative_gain"] for row in selected_units
+            ),
+            "incremental_proxy_utility": sum(
+                row["relative_gain"] for row in added_units
+            ),
+            "added_promotion_units": [row["name"] for row in added_units],
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -377,6 +386,7 @@ def generate_nested_policies(
             current,
             selected_modules,
             selected_units,
+            additions,
         )
         outputs.append(
             {
@@ -385,6 +395,10 @@ def generate_nested_policies(
                 "estimated_total_gib": current["total_bytes"] / GIB,
                 "w8_modules": len(selected_modules),
                 "promotion_units": len(selected_units),
+                "added_units": [row["name"] for row in additions],
+                "incremental_proxy_utility": sum(
+                    row["relative_gain"] for row in additions
+                ),
             }
         )
     return outputs
@@ -421,8 +435,8 @@ def parse_args():
         description="Rank streamed W4/W8 weight sensitivity and emit mixed policies."
     )
     parser.add_argument("model_dir", help="BF16 model with safetensors index.")
-    parser.add_argument("--group-size", type=int, choices=(32, 64, 128), default=128)
-    parser.add_argument("--budgets", default="66,68,69.5")
+    parser.add_argument("--group-size", type=int, choices=(32, 64, 128), default=32)
+    parser.add_argument("--budgets", default="69.5,72,74,76")
     parser.add_argument("--safety-margin-gib", type=float, default=0.25)
     parser.add_argument("--chunk-rows", type=int, default=128)
     parser.add_argument("--device", default="auto")
@@ -433,7 +447,7 @@ def parse_args():
     )
     parser.add_argument(
         "--score-json",
-        default="sensitivity_gs128.json",
+        default="sensitivity_gs32.json",
         help="Destination for reusable module and promotion-unit scores.",
     )
     parser.add_argument(
@@ -509,6 +523,12 @@ def main() -> int:
             f"{output['promotion_units']} units / {output['w8_modules']} modules -> "
             f"{output['path']}"
         )
+        print(
+            f"  added {len(output['added_units'])} units; "
+            f"incremental proxy utility={output['incremental_proxy_utility']:.8e}"
+        )
+        for name in output["added_units"]:
+            print(f"    + {name}")
     return 0
 
 

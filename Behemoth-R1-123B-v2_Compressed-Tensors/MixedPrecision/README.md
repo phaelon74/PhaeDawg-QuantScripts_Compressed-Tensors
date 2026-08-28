@@ -6,17 +6,16 @@ KLD scoring stays in the vLLM venv. This harness runs in the **llm-compressor** 
 
 ## Size rule
 
-Hard cap **70 GiB**. AutoRound GS32 is the fixed donor configuration: its
-measured KLD is 0.037094. A GS128 mixed candidate regressed to 0.043462 and is
-rejected. Spend the remaining GS32 size budget only on targeted W8 promotions.
+AutoRound GS32 is the fixed donor configuration. The 69.5 GiB mixed policy
+improved KLD from 0.037094 to 0.035669. Research tiers at 72, 74, and 76 GiB
+measure the marginal accuracy return from additional W8 promotions. Treat 76
+GiB as the exploratory ceiling until TP=4 32K-context memory is revalidated.
 
 Preflight (config.json only, no weight load):
 
 ```bash
 cd MixedPrecision
 python estimate_packed_size.py /path/to/Behemoth-R1-123B-v2 --group-size 32
-python estimate_packed_size.py /path/to/Behemoth-R1-123B-v2 --group-size 128 \
-  --promote-down-proj-layers 0,1,87 --max-disk-gib 70
 ```
 
 Exit code 2 means over budget.
@@ -40,7 +39,8 @@ python behemoth_mixed_ptq.py SRC DST recipes/baseline_512.yaml \
 # W4/W8 policies below.
 ```
 
-`--max-disk-gib 70` is enforced before `from_pretrained`.
+`--max-disk-gib` is enforced before `from_pretrained`; pass the tier ceiling
+explicitly for candidates above its conservative 70 GiB default.
 
 AutoRound uses the official llm-compressor `AutoRoundModifier` and saves
 compressed-tensors directly. AutoRound **0.13.0 or newer** is required for
@@ -74,19 +74,19 @@ together, and writes nested GS32 policies with a 0.25 GiB safety margin:
 
 ```bash
 python rank_weight_sensitivity.py SRC \
-  --group-size 32 --device cuda:0 \
+  --group-size 32 \
   --promotion-kinds all \
-  --budgets 66,68,69.5 \
+  --budgets 69.5,72,74,76 \
   --score-json results/sensitivity_gs32.json \
-  --policy-dir recipes/generated
+  --policy-dir recipes/generated \
+  --reuse-scores
 ```
 
-Once that score file exists, regenerate exact nested policies without touching
-the weights or GPU by adding `--reuse-scores`. The policy optimizer uses exact
-knapsack packing rather than greedy rank order.
+Including 69.5 as the first budget locks the validated policy before selecting
+additional units. Reuse mode does not touch the weights or GPU. Each YAML records
+its newly added units and incremental proxy utility.
 
-This weight-only score is a screening proxy. Prefer the pending ModelOpt
-gradient score for final policy selection; the frozen KLD suite remains the
+This weight-only score is a screening proxy; the frozen KLD suite remains the
 selection authority.
 
 Preflight every generated policy before loading weights:
@@ -98,23 +98,25 @@ for POLICY in recipes/generated/autoround_gs32_mixed_*.yaml; do
 done
 ```
 
-Quantize each policy with the same AutoRound settings as Candidate3:
+Quantize each expanded policy from the BF16 source with the same AutoRound
+settings as Candidate3:
 
 ```bash
-python behemoth_mixed_ptq.py SRC DST_MIXED_66 recipes/baseline_512.yaml \
-  --policy-yaml recipes/generated/autoround_gs32_mixed_66g.yaml \
+python behemoth_mixed_ptq.py SRC DST_MIXED_72 recipes/baseline_512.yaml \
+  --policy-yaml recipes/generated/autoround_gs32_mixed_72g.yaml \
+  --max-disk-gib 72 \
   --autoround-iters 200 --autoround-batch-size 1 \
   --autoround-gradient-accumulate-steps 8 --autoround-low-gpu-mem \
   --autoround-device-ids 0,1,2,3 --skip-sample-gen
 ```
 
-Repeat for `68g` and `69p5g`. Treat the streaming score as a ranking proxy;
-the frozen 204700-position KLD result remains the selection authority.
+Repeat for `74g` and `76g`, changing both the policy and `--max-disk-gib`.
+Evaluate 72G first; continue only while measured KLD improvement per added GiB
+justifies the next full run.
 
 ## KLD
 
 Score against `ref_logits_Behemoth-R1-123B-v2_ctx2048_s512` in the vLLM
-environment. AutoRound GS32 is the current winner at **0.037094**, versus
-0.042380 for the original baseline, 0.042729 for AWQMSK, and 0.046951 for
-GPTQ. The GS128 mixed result at 0.043462 is also rejected. Use AutoRound GS32
-for the default W4 scheme and selected GS32 W8 promotions.
+environment. Mixed AutoRound GS32 at 69.5 GiB is the current winner at
+**0.035669**, improving on uniform AutoRound GS32 at 0.037094. The original
+baseline scored 0.042380; AWQMSK, GPTQ, and GS128 mixed are rejected.
