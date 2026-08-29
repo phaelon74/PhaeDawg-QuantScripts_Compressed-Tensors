@@ -37,6 +37,21 @@ echo "Disk space for work and output (plan for about 150 GiB combined):"
 df -h "$WORK_DIR" "$OUT_DIR"
 
 if [[ -f "$WORK_DIR/args.json" || -f "$WORK_DIR/ckpt/job.json" ]]; then
+  if [[ -f "$WORK_DIR/args.json" ]]; then
+    saved_cal_rows="$(
+      python - "$WORK_DIR/args.json" <<'PY'
+import json
+import sys
+
+print(json.load(open(sys.argv[1], encoding="utf-8")).get("cal_rows", "unknown"))
+PY
+    )"
+    if [[ "$saved_cal_rows" != "250" ]]; then
+      echo "Saved job uses cal_rows=$saved_cal_rows, expected 250." >&2
+      echo "Archive this work/output pair and start a new job; do not resume it." >&2
+      exit 2
+    fi
+  fi
   echo "Resuming the saved 4.5-bpw job from $WORK_DIR"
   python "$CONVERT_PY" -w "$WORK_DIR" -r
 else
