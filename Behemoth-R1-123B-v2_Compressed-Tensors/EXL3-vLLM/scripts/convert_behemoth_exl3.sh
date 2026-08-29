@@ -28,7 +28,7 @@ ARGS=(
   -b 3.5
   -hb 6
   -cb mul1
-  -cr 512
+  -cr 250
   -cc 2048
   -d 0
   -ss 8192

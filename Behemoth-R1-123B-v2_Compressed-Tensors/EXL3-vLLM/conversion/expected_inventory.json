@@ -20,5 +20,5 @@
   "unquantized": ["embed_tokens", "input_layernorm", "post_attention_layernorm", "norm"],
   "size_note": "Expect roughly the low-50-GiB range. Verify with du -sb, do not assume.",
   "tensor_storage": "required",
-  "calibration": {"rows": 512, "cols": 2048}
+  "calibration": {"rows": 250, "cols": 2048}
 }

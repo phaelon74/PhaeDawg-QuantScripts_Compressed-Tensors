@@ -7,7 +7,7 @@
     "reference_logits": "/media/netmodels/ref_logits/ref_logits_Behemoth-R1-123B-v2_ctx2048_s512/",
     "scoring_script": "KLD_Scripts/run_batch_kld.sh",
     "calibration_authority": "Behemoth-R1-123B-v2_Compressed-Tensors/MixedPrecision/recipes/baseline_512.yaml",
-    "calibration_note": "512 samples (307 neuralmagic chat + 205 Rombo reasoning), seq 2048. EXL3 conversion uses the same 512x2048 dimensions."
+    "calibration_note": "The AutoRound authority uses 512 samples (307 neuralmagic chat + 205 Rombo reasoning), seq 2048. Local EXL3 conversion uses ExLlamaV3's bundled 250x2048 default; the pinned bundled wiki splitter cannot supply 512 rows."
   },
   "checkpoints": {
     "artusdev_exl3_4p25_h6": {

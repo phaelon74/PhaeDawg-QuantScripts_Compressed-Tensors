@@ -14,6 +14,6 @@ Pins:
 - decoder target `3.5` bpw
 - `head_bits=6`
 - `codebook=mul1`
-- calibration `512 x 2048`
+- calibration `250 x 2048` (pinned bundled corpus limit; 512 overflows wiki articles)
 - GPU 0 only
 - `--resume` against a work directory large enough for a complete output copy

@@ -109,8 +109,8 @@ The ArtusDev checkpoints use ExLlamaV3 0.0.6 metadata, implicit codebooks
 `lm_head`. The plugin has loaded and scored both successfully.
 
 The local 4.5-bpw experiment is converted directly from BF16 with the pinned
-ExLlamaV3 source, 512×2048 default ExLlamaV3 calibration, H6 `lm_head`, and
-explicit `mul1`. Never requantize the 4.25-bpw checkpoint. `mul1` is selected
+ExLlamaV3 source, its supported default 250×2048 calibration, H6 `lm_head`,
+and explicit `mul1`. Never requantize the 4.25-bpw checkpoint. `mul1` is selected
 because the Ampere INT8 GEMV path covers decoder tiles at K≤5.
 
 BF16 is on this host at `/media/fmodels/TheDrummer/Behemoth-R1-123B-v2/`
@@ -456,7 +456,8 @@ The new job uses:
 - target average `4.5` bpw;
 - H6 `lm_head`;
 - explicit `mul1` codebook for the Ampere K≤5 INT8 GEMV path;
-- 512 rows × 2048 tokens of ExLlamaV3's default calibration corpus;
+- 250 rows × 2048 tokens of ExLlamaV3's default calibration corpus (ArtusDev
+  used 100×2048; the pinned bundled wiki splitter overflows at 512 rows);
 - 8192 MiB output shards;
 - pinned ExLlamaV3 commit `0c49587a7c235e6303a6bbedc8b665272ad3a2ea`.
 
