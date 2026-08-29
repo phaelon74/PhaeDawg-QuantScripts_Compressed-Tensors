@@ -4,14 +4,31 @@
   "model": "TheDrummer/Behemoth-R1-123B-v2",
   "kld": {
     "positions": 204700,
-    "reference_logits": "~/kld-nightly-vllm/kld-vllm/ref_logits_Behemoth-R1-123B-v2_ctx2048_s512/",
+    "reference_logits": "/media/netmodels/ref_logits/ref_logits_Behemoth-R1-123B-v2_ctx2048_s512/",
     "scoring_script": "KLD_Scripts/run_batch_kld.sh",
     "calibration_authority": "Behemoth-R1-123B-v2_Compressed-Tensors/MixedPrecision/recipes/baseline_512.yaml",
     "calibration_note": "512 samples (307 neuralmagic chat + 205 Rombo reasoning), seq 2048. EXL3 conversion uses the same 512x2048 dimensions."
   },
   "checkpoints": {
+    "artusdev_exl3_4p25_h6": {
+      "role": "current_quality_size_winner",
+      "path": "/media/fmodels/ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3/4.25bpw_H6",
+      "du_sh": "62G",
+      "mean_kld": 0.015800,
+      "kld_throughput_positions_per_s": 278.61,
+      "backend": "EXL3 SM86 vLLM plugin, TP4 eager"
+    },
+    "artusdev_exl3_3p5_h6": {
+      "role": "accepted_memory_first",
+      "path": "/media/fmodels/ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3/3.5bpw_H6",
+      "du_sh": "51G",
+      "bytes": 54437637984,
+      "mean_kld_runs": [0.045794, 0.045794],
+      "kld_throughput_positions_per_s_runs": [283.75, 284.52],
+      "backend": "EXL3 SM86 vLLM plugin, TP4 eager"
+    },
     "mixed_autoround_gs32_72g": {
-      "role": "current_accuracy_winner",
+      "role": "frozen_marlin_reference",
       "path": "/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/AutoRound_GS32_Mixed_72G",
       "du_sh": "72G",
       "byte_size_note": "du -sh reports the rounded value 72G. Record exact bytes with `du -sb` on the Linux host when capturing the stack manifest.",
@@ -39,9 +56,10 @@
     }
   },
   "exl3_quality_gates": {
-    "minimum_mean_kld": 0.042380,
-    "minimum_note": "Must not exceed the original AWQ floor. Substantial VRAM saving vs 72G is required.",
-    "stretch_mean_kld": 0.034004,
-    "stretch_note": "Approach the current 72 GiB mixed AutoRound winner. Do not compare against unrelated GLM KLD numbers."
+    "memory_first_3p5_accepted_mean_kld": 0.045794,
+    "production_candidate_max_mean_kld": 0.034004,
+    "current_best_mean_kld": 0.015800,
+    "target_4p5_max_du_sh": "70G",
+    "note": "The 3.5-bpw tier is accepted for memory-first use. Production candidates should beat the former AutoRound winner; 4.25-bpw does. Do not compare against unrelated-model KLD numbers."
   }
 }

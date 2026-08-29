@@ -78,24 +78,23 @@ vLLM. The plugin version-guards this host’s captured ABI:
 Populate those existing venvs with the pins below. Do not create `~/exl3-vllm`
 or `~/exllamav3-convert`.
 
-## Behemoth checkpoint (use this; do not reconvert first)
+## Behemoth EXL3 checkpoints and measured accuracy
 
-**Use the existing ArtusDev EXL3.** Do not spend a 123B conversion unless
-validation, current-kernel parity, or KLD fails.
+Both ArtusDev checkpoints load and generate under the native SM86 plugin on
+TP4 RTX 3090. Authoritative eager KLD uses 204,700 positions, context 2048,
+stride 512, and the reference logits under `/media/netmodels/ref_logits/`.
 
-| Field | Value |
-| --- | --- |
-| Local path | `/media/fmodels/ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3/3.5bpw_H6` |
-| Hub | [ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3 @ `3.5bpw_H6`](https://huggingface.co/ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3/tree/3.5bpw_H6) |
-| Hub size | 54.4 GB |
-| `bits` / `head_bits` | 3.5 / 6 |
-| Converter | ExLlamaV3 `version: 0.0.6` |
-| Calibration | **100 × 2048** (not our 512 × 2048 recipe) |
-| `tensor_storage` | present (`quantization_config.json`) |
-| `lm_head` | K6 trellis `[768, 2048, 96]` |
-| Codebook markers | **none** (no `mul1` / `mcg` tensors; 0.0.6 implicit default codebook) |
-| Decoder mix | budgeted 3.5 bpw: K3 / K4 / **K5** (not K3/K4-only) |
-| BF16 source (optional remake only) | `/media/fmodels/TheDrummer/Behemoth-R1-123B-v2/` |
+| Checkpoint | `du -sh` | Mean KLD | Result |
+| --- | ---: | ---: | --- |
+| ArtusDev `3.5bpw_H6` | 51G (50.70 GiB exact) | 0.045794 twice | Accepted memory-first |
+| ArtusDev `4.25bpw_H6` | 62G | **0.015800** | Current quality/size winner |
+| Mixed AutoRound GS32 | 72G | 0.034004 | Former quality reference |
+
+The 4.25-bpw checkpoint lowers KLD by 53.5% relative to the 72G AutoRound
+checkpoint while using 10G less rounded disk space. This does not establish
+serving speed; benchmark both EXL3 candidates after the 4.5-bpw KLD run.
+Machine-readable receipt:
+[`results/behemoth_exl3_kld.json`](results/behemoth_exl3_kld.json).
 
 ```bash
 export MODEL_DIR=/media/fmodels/ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3/3.5bpw_H6
@@ -105,17 +104,14 @@ ls "$BF16_DIR/config.json"
 du -sb "$MODEL_DIR"
 ```
 
-This is the right format for the plugin (dense Mistral, independent `suh` /
-`svh` / `trellis`, quantized `lm_head`). A fresh local convert is **optional
-follow-up**, not a prerequisite, and only if one of these happens:
+The ArtusDev checkpoints use ExLlamaV3 0.0.6 metadata, implicit codebooks
+(no `mul1`/`mcg` marker tensors), K3/K4/K5 decoder tiles, and an H6
+`lm_head`. The plugin has loaded and scored both successfully.
 
-1. Current `exllamav3_ext` cannot decode 0.0.6 trellises (parity / garbage).
-2. Frozen KLD fails the 0.042380 floor and you want 512-row calibration.
-3. Decode stays slow because there is no `mul1` marker (Ampere INT8 GEMV is
-   mul1 K≤5). Then reconvert with `-cb mul1 -cr 512`.
-
-Until then, skip `scripts/convert_behemoth_exl3.sh`. Still run the kernel
-microbench and (recommended) small-Mistral loader test before loading 123B.
+The local 4.5-bpw experiment is converted directly from BF16 with the pinned
+ExLlamaV3 source, 512×2048 default ExLlamaV3 calibration, H6 `lm_head`, and
+explicit `mul1`. Never requantize the 4.25-bpw checkpoint. `mul1` is selected
+because the Ampere INT8 GEMV path covers decoder tiles at K≤5.
 
 BF16 is on this host at `/media/fmodels/TheDrummer/Behemoth-R1-123B-v2/`
 (~245 GiB). You do **not** need it unless you later remake the quant. You
@@ -391,9 +387,9 @@ load the 123B ArtusDev tree yet.
 
 ---
 
-## 6. Validate ArtusDev (skip convert)
+## 6. Validate ArtusDev and create the 4.5-bpw candidate
 
-Do **not** run `convert_behemoth_exl3.sh` on this pass.
+Inventory either downloaded checkpoint:
 
 ```bash
 source "$VENV_VLLM/bin/activate"
@@ -407,20 +403,113 @@ python scripts/validate_exl3_checkpoint.py "$MODEL_DIR" --allow-non-behemoth
 Expect ~616 EXL3 decoder records, H6 `lm_head`, non-empty `tensor_storage`,
 size near 54.4 GB. Then go to step 7 with this `MODEL_DIR`.
 
-Optional remake (only if step 7 KLD/parity/speed forces it), from **BF16**:
+### 6.1 Preflight the 4.5-bpw conversion
+
+Convert from the original BF16 model, never from an existing quant. The
+4.25-bpw and 5.0-bpw ArtusDev sizes imply approximately 67G rounded for
+4.5-bpw, but this is only an estimate. The work directory must hold another
+complete quantized copy, so plan for at least 150 GiB free when work and output
+share a filesystem.
 
 ```bash
-source "$VENV_CONVERT/bin/activate"
+export WORK=/home/phaedawg/kld-exl3-vllm
+export EXL3=$WORK/PhaeDawg-QuantScripts_Compressed-Tensors/Behemoth-R1-123B-v2_Compressed-Tensors/EXL3-vLLM
+export EXLLAMAV3_SRC=$HOME/src/exllamav3
+export IN_DIR=/media/fmodels/TheDrummer/Behemoth-R1-123B-v2
+export WORK_DIR=/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/EXL3_4p5_H6_mul1.work
+export OUT_DIR=/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/EXL3_4p5_H6_mul1
+
+test -f "$IN_DIR/config.json" || test -f "$IN_DIR/main/config.json"
+test -f "$EXLLAMAV3_SRC/convert.py"
+git -C "$EXLLAMAV3_SRC" rev-parse HEAD
+# Must be 0c49587a7c235e6303a6bbedc8b665272ad3a2ea
+df -h "$(dirname "$WORK_DIR")" "$(dirname "$OUT_DIR")"
+```
+
+The known-working `kld-exl3-vllm` environment already has the pinned
+ExLlamaV3 extension and all converter imports. It may be used directly; do not
+install or upgrade packages during conversion. Confirm before starting:
+
+```bash
+source /home/phaedawg/kld-exl3-vllm/kld-exl3-vllm/bin/activate
+python -c "import torch, exllamav3, exllamav3_ext; print(torch.__version__, torch.version.cuda, exllamav3_ext.__file__)"
+```
+
+### 6.2 Start or resume
+
+Use physical GPU 1 only. After `CUDA_VISIBLE_DEVICES=1`, converter `-d 0`
+correctly means logical device 0 = physical GPU 1.
+
+```bash
 cd "$EXL3"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=1
-export CONVERT_PY=$HOME/src/exllamav3/convert.py
-export IN_DIR=/media/fmodels/TheDrummer/Behemoth-R1-123B-v2
-./scripts/convert_behemoth_exl3.sh
+chmod +x scripts/convert_behemoth_exl3_4p5.sh
+set -o pipefail
+./scripts/convert_behemoth_exl3_4p5.sh 2>&1 | tee results/convert_behemoth_exl3_4p5.log
 ```
 
-`convert_behemoth_exl3.sh` defaults `-d 0`, which is correct **after**
-`CUDA_VISIBLE_DEVICES=1`. Forgetting the export would hit busy GPU 0.
+Run that block inside `tmux` if the SSH session may disconnect.
+
+The new job uses:
+
+- target average `4.5` bpw;
+- H6 `lm_head`;
+- explicit `mul1` codebook for the Ampere K≤5 INT8 GEMV path;
+- 512 rows × 2048 tokens of ExLlamaV3's default calibration corpus;
+- 8192 MiB output shards;
+- pinned ExLlamaV3 commit `0c49587a7c235e6303a6bbedc8b665272ad3a2ea`.
+
+If SSH disconnects or the process stops, export the same paths and invoke the
+same script. It detects `$WORK_DIR/args.json` or
+`$WORK_DIR/ckpt/job.json` and runs the official resume form:
+
+```bash
+python "$EXLLAMAV3_SRC/convert.py" -w "$WORK_DIR" -r
+```
+
+Do not change bitrate, codebook, calibration dimensions, input, or output
+while resuming. Do not delete `$WORK_DIR` until inventory, TP4 load, and KLD
+are complete.
+
+### 6.3 Validate and score
+
+The script writes `results/behemoth_exl3_4p5_inventory.json` and prints exact
+bytes when conversion completes. Verify explicitly:
+
+```bash
+python "$EXL3/scripts/validate_exl3_checkpoint.py" \
+  "$OUT_DIR" --allow-non-behemoth \
+  --sha-manifest "$EXL3/results/behemoth_exl3_4p5_inventory.json"
+du -sh "$OUT_DIR"
+du -sb "$OUT_DIR"
+```
+
+Then run the same patched eager KLD harness used for 3.5 and 4.25 bpw. Require
+204,700 positions and record both mean KLD and positions/s. Do not infer
+4.5-bpw quality from bitrate alone.
+
+```bash
+export KLD_VLLM=/home/phaedawg/kld-exl3-vllm/kldexl3-vllm
+export MODEL_DIR="$OUT_DIR"
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES=1,2,3,4
+export VLLM_PLUGINS=vllm_exl3_sm86
+export VLLM_EXL3_EXT_PATH="$EXL3/build/exllamav3_ext"
+export VLLM_EXL3_SKIP_VERSION_GUARD=1
+export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+cd "$KLD_VLLM"
+python examples/offline_inference/score_mode_kld.py \
+  --model "$MODEL_DIR/" \
+  --reference-logits /media/netmodels/ref_logits/ref_logits_Behemoth-R1-123B-v2_ctx2048_s512/ \
+  --dataset wikitext \
+  --dataset-config wikitext-2-raw-v1 \
+  --tensor-parallel-size 4 \
+  --gpu-memory-utilization 0.92 \
+  --quantization exl3
+```
 
 ---
 
@@ -453,9 +542,10 @@ lives on another box; score **here** with the SM86 extension):
 
 Gates:
 
-- minimum mean KLD ≤ **0.042380**
-- stretch: approach **0.034004** (72G mixed AutoRound winner)
-- ≥32K BF16 KV on TP4
+- 3.5-bpw memory-first receipt: **0.045794** reproducibly
+- production candidate: mean KLD < **0.034004**
+- current EXL3 leader: 4.25-bpw at **0.015800**
+- TP4 BF16 KV pool capacity greater than 32K tokens
 - do not compare against GLM KLD numbers
 
 Serve (eager until graphs are proven):
@@ -507,23 +597,24 @@ experimental memory-first and leave the 72G Marlin checkpoint in production.
 ## Checklist (in order)
 
 1. Confirm physical 0 and 5 stay busy; we only touch 1–4.
-2. `$VENV_VLLM` already has Torch `2.9.1+cu130` and vLLM `1f369db5d`.
+2. KLD environment has Torch `2.13.0+cu132`, vLLM
+   `0.1.dev20517+gb99dae944`, and the score-mode prompt passthrough patch.
 3. `capture_manifest.sh` → `manifests/stack.captured.json`.
 4. Build `exllamav3_ext` with `TORCH_CUDA_ARCH_LIST=8.6`; `pip install -e plugin`.
 5. `pip install pytest` in `$VENV_VLLM`; `python -m pytest tests -q` (not system `pytest`).
 6. `kernel_microbench.py --fail-on-gate` on physical GPU 1. **Stop if it fails.**
-7. Populate `$VENV_CONVERT`; convert small Mistral on physical GPU 1.
-8. `validate_small_mistral.py --tp 1,4` on physical 1–4.
-9. Validate ArtusDev `3.5bpw_H6` (`validate_exl3_checkpoint.py --allow-non-behemoth`). Do not convert 123B unless later gates fail.
-10. TP4 eager load, 32K KV, native logits, frozen KLD.
-11. Crossover, prewarm, graphs, Marlin bake-off, restart test.
+7. ArtusDev 3.5 and 4.25-bpw TP4 eager load and KLD receipts captured.
+8. Convert 4.5-bpw H6 mul1 from BF16 on physical GPU 1; retain work state.
+9. Validate inventory and exact bytes; TP4 eager load on physical 1–4.
+10. Score 4.5-bpw over all 204,700 positions with the same reference logits.
+11. Benchmark 4.25 and 4.5 EXL3 against Marlin; then evaluate graphs and restart.
 
 ---
 
 ## Do not
 
 - Use physical GPU 0 or 5.
-- Reconvert Behemoth from BF16 before trying the ArtusDev 3.5bpw_H6 tree.
+- Requantize an existing EXL3, Marlin, or AutoRound checkpoint.
 - Convert from the 72G Marlin / AutoRound checkpoint.
 - Install ExLlamaV3 or this plugin into `~/llmcompressor-nightly`.
 - Enable CUDA graphs (`ENFORCE_EAGER=0`) before eager TP4 + KLD + prewarm.

@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "model": "TheDrummer/Behemoth-R1-123B-v2",
+  "dataset": "wikitext-2-raw-v1",
+  "context_length": 2048,
+  "stride": 512,
+  "positions": 204700,
+  "reference_logits": "/media/netmodels/ref_logits/ref_logits_Behemoth-R1-123B-v2_ctx2048_s512/",
+  "runtime": {
+    "vllm_branch": "phaelon74/vllm feature/score-mode-ppl-kld",
+    "vllm_version": "0.1.dev20517+gb99dae944",
+    "torch": "2.13.0+cu132",
+    "cuda": "13.2",
+    "tensor_parallel_size": 4,
+    "gpus": "4x RTX 3090 SM86, physical 1-4",
+    "enforce_eager": true,
+    "v2_model_runner": false,
+    "cuda_graphs": false,
+    "note": "The renderer must preserve target_token_ids, reference_logits_path, and reference_logits_key in vllm/entrypoints/offline_utils.py."
+  },
+  "checkpoints": [
+    {
+      "name": "ArtusDev 3.5bpw_H6",
+      "path": "/media/fmodels/ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3/3.5bpw_H6",
+      "du_sh": "51G",
+      "bytes": 54437637984,
+      "gib": 50.7,
+      "mean_kld_runs": [
+        0.045794,
+        0.045794
+      ],
+      "positions_per_second_runs": [
+        283.75,
+        284.52
+      ],
+      "status": "accepted_memory_first"
+    },
+    {
+      "name": "ArtusDev 4.25bpw_H6",
+      "path": "/media/fmodels/ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3/4.25bpw_H6",
+      "du_sh": "62G",
+      "bytes": null,
+      "mean_kld_runs": [
+        0.0158
+      ],
+      "positions_per_second_runs": [
+        278.61
+      ],
+      "status": "current_quality_size_winner"
+    }
+  ],
+  "references": {
+    "mixed_autoround_gs32_72g": {
+      "du_sh": "72G",
+      "mean_kld": 0.034004,
+      "positions_per_second": 605.23
+    },
+    "original_awq_floor": {
+      "du_sh": "66G",
+      "mean_kld": 0.04238
+    }
+  }
+}
