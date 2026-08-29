@@ -12,7 +12,9 @@ def _truthy(name: str) -> bool:
 
 
 def check_runtime(*, require_cuda: bool = True) -> None:
-    if _truthy("VLLM_EXL3_SKIP_VERSION_GUARD"):
+    if _truthy("VLLM_EXL3_SKIP_VERSION_GUARD") or _truthy(
+        "VLLM_EXL3_ALLOW_VLLM_DRIFT"
+    ):
         return
     errors: list[str] = []
     try:
