@@ -585,9 +585,66 @@ Release checks:
 ```bash
 export MODEL_DIR=/media/fmodels/ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3/3.5bpw_H6
 MODEL_DIR="$MODEL_DIR" ./scripts/restart_test.sh
-python scripts/bench_exl3_vs_marlin.py --mode exl3 --model-dir "$MODEL_DIR" \
-  --output results/exl3_tp4_bench.json
 ```
+
+### Remote serving benchmark: 1K through 32K
+
+Serve one checkpoint at a time with the same TP4, eager/graph, maximum model
+length, batching, and KV-cache settings. For the first comparison, use eager
+for all three backends to isolate quantization/backend behavior. The server
+must permit at least 32,768 prompt + 256 output tokens.
+
+Run the client on the same machine or same LAN path for every model because
+TTFT includes network and scheduler delay:
+
+```bash
+export VLLM_API_KEY='replace-me'
+
+python scripts/bench_serving_contexts.py \
+  --host 192.0.2.10 \
+  --api-key "$VLLM_API_KEY" \
+  --model Behemoth-R1-123B-v2-EXL3-4.25-H6 \
+  --label artus-exl3-4p25 \
+  --contexts 1024,2048,4096,8192,16384,32768 \
+  --output-tokens 256 \
+  --warmup-runs 1 \
+  --runs 3 \
+  --output results/serving_artus_exl3_4p25.json
+```
+
+Repeat without changing client/server topology:
+
+```bash
+# 69.5G mixed Intel AutoRound / compressed-tensors server
+python scripts/bench_serving_contexts.py \
+  --host 192.0.2.10 --api-key "$VLLM_API_KEY" \
+  --model Behemoth-R1-123B-v2-AutoRound-69p5G \
+  --label autoround-69p5g \
+  --output results/serving_autoround_69p5g.json
+
+# Local 4.5-bpw EXL3 server
+python scripts/bench_serving_contexts.py \
+  --host 192.0.2.10 --api-key "$VLLM_API_KEY" \
+  --model Behemoth-R1-123B-v2-EXL3-4.5-H6 \
+  --label local-exl3-4p5 \
+  --output results/serving_local_exl3_4p5.json
+```
+
+The default contexts are already 1K/2K/4K/8K/16K/32K, with one warmup and
+three measured runs each. Every request:
+
+- sends an exact token-ID prompt produced by the server's `/tokenize` endpoint;
+- changes the first token block to prevent prefix-cache reuse;
+- requests exactly 256 tokens with temperature 0 and `ignore_eos`;
+- streams `/v1/completions` to measure TTFT, decode tok/s, TPOT, and
+  SSE inter-chunk p50/p95/p99;
+- reports effective prefill tok/s as prompt tokens divided by TTFT;
+- writes both JSON and CSV after every measured run, preserving partial work.
+
+`effective_prefill_tok_s` is request-level throughput and includes network,
+queueing, and first-token decode. It is appropriate for an apples-to-apples
+serving comparison but is not raw kernel throughput. Confirm
+`stream_chunks_match_tokens=true` before treating chunk ITL as token ITL.
 
 Targets: ≥90% of Marlin prefill/decode on the production 8K batch; p99 TPOT
 ≤15% worse. If optimized M=1 stays below 60% of Marlin, keep EXL3 as

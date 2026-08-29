@@ -1,9 +1,11 @@
-# Native EXL3 3.5-bpw for vLLM on SM86
+# Native EXL3 for vLLM on SM86
 
-Dense-only EXL3 backend for **Behemoth-R1-123B-v2** on **TP4 RTX 3090**. This workstream does not touch the compressed-tensors / Marlin path.
+Dense-only EXL3 backend and 3.5/4.25/4.5-bpw evaluation for
+**Behemoth-R1-123B-v2** on **TP4 RTX 3090**. This workstream does not touch
+the compressed-tensors / Marlin path.
 
 ```
-BF16 --> EXL3 convert (3.5 bpw, H6, mul1) --> safetensors
+BF16 --> EXL3 convert (H6, mul1) --> safetensors
      --> vLLM plugin (exl3) --> SM86 decode GEMM / reconstruct+cuBLAS prefill
      --> TP4 gates (KLD, speed, memory, graphs)
 ```
@@ -27,9 +29,10 @@ Full install for **d011sd02** (physical GPUs **1–4**, leave 0 and 5 alone): [I
 3. Pass kernel gates (`scripts/kernel_microbench.py`).
 4. `pip install -e plugin` into `~/kld-nightly-vllm`.
 5. Validate on a small Mistral EXL3 checkpoint.
-6. Convert Behemoth in `~/exllamav3-convert` (`scripts/convert_behemoth_exl3.sh`).
+6. Convert the 4.5-bpw candidate (`scripts/convert_behemoth_exl3_4p5.sh`).
 7. Load TP4 `--enforce-eager`, then KLD.
-8. Tune reconstruct thresholds and decode graphs only after correctness.
+8. Benchmark 1K–32K serving with `scripts/bench_serving_contexts.py`.
+9. Tune reconstruct thresholds and decode graphs only after correctness.
 
 ## Isolated pins
 
