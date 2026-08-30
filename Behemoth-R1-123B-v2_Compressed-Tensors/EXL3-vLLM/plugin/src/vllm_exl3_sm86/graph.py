@@ -21,7 +21,7 @@ from .constants import (
     GRAPH_CAPTURE_SIZES,
     HEAD_BITRATE,
 )
-from .ops import call_exl3_gemm
+from .ops import call_exl3_gemm, call_exl3_mgemm, ext_has_mgemm
 from .prefill import preallocate_workspaces
 
 
@@ -90,6 +90,54 @@ def prewarm_behemoth_tp4(
                             "m": int(m),
                             "mcg": bool(mcg),
                             "mul1": bool(mul1),
+                        }
+                    )
+    if ext_has_mgemm():
+        k, n = BEHEMOTH_TP4_SHAPES["gate_proj"]
+        requested = tuple(dict.fromkeys(int(b) for b in bitrates)) or (4,)
+        for bitrate in requested:
+            for mcg, mul1 in codebooks:
+                for m in capture_sizes:
+                    x, trellis0, suh0, svh0 = _dummy_payloads(device, k, n, bitrate, m)
+                    _, trellis1, suh1, svh1 = _dummy_payloads(device, k, n, bitrate, m)
+                    ptrs_trellis = torch.tensor(
+                        [int(trellis0.data_ptr()), int(trellis1.data_ptr())],
+                        dtype=torch.int64,
+                        device=device,
+                    )
+                    ptrs_suh = torch.tensor(
+                        [int(suh0.data_ptr()), int(suh1.data_ptr())],
+                        dtype=torch.int64,
+                        device=device,
+                    )
+                    ptrs_svh = torch.tensor(
+                        [int(svh0.data_ptr()), int(svh1.data_ptr())],
+                        dtype=torch.int64,
+                        device=device,
+                    )
+                    out = torch.empty((2, int(m), n), dtype=torch.float16, device=device)
+                    x_had = torch.empty((2, int(m), k), dtype=torch.float16, device=device)
+                    call_exl3_mgemm(
+                        x.view(1, int(m), k),
+                        ptrs_trellis,
+                        ptrs_suh,
+                        ptrs_svh,
+                        int(bitrate),
+                        bool(mcg),
+                        bool(mul1),
+                        out,
+                        x_had,
+                    )
+                    receipts.append(
+                        {
+                            "name": "gate_up_proj",
+                            "k": k,
+                            "n": n,
+                            "bitrate": bitrate,
+                            "m": int(m),
+                            "mcg": bool(mcg),
+                            "mul1": bool(mul1),
+                            "mgemm": True,
                         }
                     )
     torch.cuda.synchronize(device)

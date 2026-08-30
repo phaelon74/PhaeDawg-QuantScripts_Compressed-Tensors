@@ -156,17 +156,59 @@ def exl3_gemm_fake(
     )
 
 
-def register_custom_op() -> None:
-    """Register vllm::exl3_gemm and vllm::exl3_gemm_out once."""
-    global _OP_REGISTERED
-    if _OP_REGISTERED:
-        return
+def ext_has_mgemm() -> bool:
+    try:
+        return hasattr(_load_exl3_ext(), "exl3_mgemm")
+    except Exception:
+        return False
 
+
+def exl3_mgemm_impl(
+    x: torch.Tensor,
+    ptrs_trellis: torch.Tensor,
+    ptrs_suh: torch.Tensor,
+    ptrs_svh: torch.Tensor,
+    bitrate: int,
+    mcg: bool,
+    mul1: bool,
+    out: torch.Tensor,
+    x_had: torch.Tensor,
+) -> None:
+    """One input, two outputs: A is (1, M, K), C is (2, M, N), A_had is (2, M, K)."""
+    ext = _load_exl3_ext()
+    if x.dim() == 2:
+        x = x.unsqueeze(0)
+    with nvtx_range("exl3.mgemm"):
+        ext.exl3_mgemm(
+            x,
+            ptrs_trellis,
+            out,
+            ptrs_suh,
+            x_had,
+            ptrs_svh,
+            None,
+            None,
+            int(bitrate),
+            -1,
+            bool(mcg),
+            bool(mul1),
+            -1,
+            -1,
+            0,
+            1,
+            None,
+            None,
+        )
+
+
+def register_custom_op() -> None:
+    """Register vllm::exl3_gemm, exl3_gemm_out, and exl3_mgemm_out once."""
+    global _OP_REGISTERED
     has_vllm = hasattr(torch.ops, "vllm")
     has_gemm = has_vllm and hasattr(torch.ops.vllm, "exl3_gemm")
     has_out = has_vllm and hasattr(torch.ops.vllm, "exl3_gemm_out")
-    if has_gemm and has_out:
-        _OP_REGISTERED = True
+    has_mgemm = has_vllm and hasattr(torch.ops.vllm, "exl3_mgemm_out")
+    if _OP_REGISTERED and has_gemm and has_out and has_mgemm:
         return
 
     if not has_gemm:
@@ -229,6 +271,60 @@ def register_custom_op() -> None:
         ) -> None:
             del x, trellis, suh, svh, mcg, mul1, out, x_had
 
+    if not has_mgemm:
+
+        @torch.library.custom_op(
+            "vllm::exl3_mgemm_out",
+            mutates_args=("out", "x_had"),
+            device_types="cuda",
+        )
+        def _exl3_mgemm_out(
+            x: torch.Tensor,
+            ptrs_trellis: torch.Tensor,
+            ptrs_suh: torch.Tensor,
+            ptrs_svh: torch.Tensor,
+            bitrate: int,
+            mcg: bool,
+            mul1: bool,
+            out: torch.Tensor,
+            x_had: torch.Tensor,
+        ) -> None:
+            exl3_mgemm_impl(
+                x,
+                ptrs_trellis,
+                ptrs_suh,
+                ptrs_svh,
+                bitrate,
+                mcg,
+                mul1,
+                out,
+                x_had,
+            )
+
+        @_exl3_mgemm_out.register_fake
+        def _exl3_mgemm_out_fake(
+            x: torch.Tensor,
+            ptrs_trellis: torch.Tensor,
+            ptrs_suh: torch.Tensor,
+            ptrs_svh: torch.Tensor,
+            bitrate: int,
+            mcg: bool,
+            mul1: bool,
+            out: torch.Tensor,
+            x_had: torch.Tensor,
+        ) -> None:
+            del (
+                x,
+                ptrs_trellis,
+                ptrs_suh,
+                ptrs_svh,
+                bitrate,
+                mcg,
+                mul1,
+                out,
+                x_had,
+            )
+
     _OP_REGISTERED = True
 
 
@@ -255,3 +351,44 @@ def call_exl3_gemm(
     if hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm, "exl3_gemm"):
         return torch.ops.vllm.exl3_gemm(x, trellis, suh, svh, mcg, mul1)
     return exl3_gemm_impl(x, trellis, suh, svh, mcg, mul1)
+
+
+def call_exl3_mgemm(
+    x: torch.Tensor,
+    ptrs_trellis: torch.Tensor,
+    ptrs_suh: torch.Tensor,
+    ptrs_svh: torch.Tensor,
+    bitrate: int,
+    mcg: bool,
+    mul1: bool,
+    out: torch.Tensor,
+    x_had: torch.Tensor,
+) -> torch.Tensor:
+    register_custom_op()
+    if x.dim() == 2:
+        x = x.unsqueeze(0)
+    if hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm, "exl3_mgemm_out"):
+        torch.ops.vllm.exl3_mgemm_out(
+            x,
+            ptrs_trellis,
+            ptrs_suh,
+            ptrs_svh,
+            int(bitrate),
+            mcg,
+            mul1,
+            out,
+            x_had,
+        )
+        return out
+    exl3_mgemm_impl(
+        x,
+        ptrs_trellis,
+        ptrs_suh,
+        ptrs_svh,
+        bitrate,
+        mcg,
+        mul1,
+        out,
+        x_had,
+    )
+    return out

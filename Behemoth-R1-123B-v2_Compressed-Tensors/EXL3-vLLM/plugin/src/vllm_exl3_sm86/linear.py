@@ -1,4 +1,4 @@
-"""Dense EXL3 linear method: independent Q/K/V and gate/up payloads."""
+"""Dense EXL3 linear method: independent Q/K/V; fused gate/up decode via mgemm."""
 
 from __future__ import annotations
 
@@ -22,8 +22,9 @@ from .constants import (
     MUL1_SENTINEL,
     TRELLIS_TILE,
 )
+from .grouped import enable_mgemm_if_eligible
 from .nvtx import nvtx_range
-from .ops import call_exl3_gemm
+from .ops import call_exl3_gemm, call_exl3_mgemm
 from .parameter import Exl3Parameter, exl3_weight_loader
 from .slicing import (
     ShardId,
@@ -135,6 +136,7 @@ class Exl3LinearMethod(LinearMethodBase):
                     device=device, non_blocking=True
                 ).contiguous()
         self._allocate_decode_workspaces(layer)
+        enable_mgemm_if_eligible(layer)
 
     def apply(
         self,
@@ -146,11 +148,19 @@ class Exl3LinearMethod(LinearMethodBase):
         original_dtype = x.dtype
         with nvtx_range("exl3.apply"):
             x_2d = x.reshape(-1, x.shape[-1]).to(torch.float16).contiguous()
-            outputs = [
-                self._apply_one(layer, x_2d, shard_id)
-                for shard_id in layer.exl3_shard_ids
-            ]
-            output = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+            mgemm_ws = getattr(layer, "exl3_mgemm_out_ws", None)
+            if (
+                getattr(layer, "exl3_use_mgemm", False)
+                and mgemm_ws is not None
+                and x_2d.shape[0] in mgemm_ws
+            ):
+                output = self._apply_mgemm(layer, x_2d)
+            else:
+                outputs = [
+                    self._apply_one(layer, x_2d, shard_id)
+                    for shard_id in layer.exl3_shard_ids
+                ]
+                output = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
             if bias is not None:
                 output = output + bias.to(dtype=output.dtype)
             output = output.reshape(*original_shape, output.shape[-1])
@@ -306,6 +316,38 @@ class Exl3LinearMethod(LinearMethodBase):
             layer.exl3_xhad_ws[shard_id] = torch.empty(
                 (max_m, k), dtype=torch.float16, device=device
             )
+
+    @staticmethod
+    def _apply_mgemm(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+        m = int(x.shape[0])
+        packed_k = int(layer.exl3_mgemm_k)
+        if x.shape[-1] > packed_k:
+            raise ValueError(
+                f"EXL3 input width {x.shape[-1]} exceeds packed K={packed_k}"
+            )
+        if x.shape[-1] < packed_k:
+            padded = layer.exl3_mgemm_x_ws[m]
+            padded.zero_()
+            padded[:, : x.shape[-1]].copy_(x)
+            x = padded
+        out = layer.exl3_mgemm_out_ws[m]
+        packed = layer.exl3_mgemm_packed_ws[m]
+        call_exl3_mgemm(
+            x.view(1, m, packed_k),
+            layer.exl3_mgemm_ptrs_trellis,
+            layer.exl3_mgemm_ptrs_suh,
+            layer.exl3_mgemm_ptrs_svh,
+            layer.exl3_mgemm_bitrate,
+            layer.exl3_mgemm_mcg,
+            layer.exl3_mgemm_mul1,
+            out,
+            layer.exl3_mgemm_xhad_ws[m],
+        )
+        n0 = Exl3LinearMethod._output_shard_size(layer, layer.exl3_mgemm_shards[0])
+        n1 = Exl3LinearMethod._output_shard_size(layer, layer.exl3_mgemm_shards[1])
+        packed[:, :n0].copy_(out[0, :, :n0])
+        packed[:, n0 : n0 + n1].copy_(out[1, :, :n1])
+        return packed[:, : n0 + n1]
 
     @staticmethod
     def _apply_one(

@@ -29,9 +29,9 @@ def _ext():
         pytest.skip(str(exc))
 
 
-def _payloads(bitrate: int, m: int, dtype: torch.dtype, device: torch.device):
+def _payloads(bitrate: int, m: int, dtype: torch.dtype, device: torch.device, seed: int = 0):
     k, n = 256, 256
-    torch.manual_seed(0)
+    torch.manual_seed(seed)
     # Match kernel_microbench: bounded codes, not the full int16 range.
     trellis = torch.randint(
         -1024,
@@ -161,3 +161,59 @@ def test_plugin_matches_reconstructed_fp16(bitrate, m, dtype, monkeypatch):
         pytest.fail(
             f"parity failed bitrate={bitrate} M={m} dtype={dtype}: max_err={max_err}"
         )
+
+
+@pytest.mark.parametrize("m", [1, 2, 4])
+def test_mgemm_matches_two_gemms(m, monkeypatch):
+    monkeypatch.setenv("VLLM_EXL3_FORCE_COMPRESSED", "1")
+    monkeypatch.delenv("VLLM_EXL3_FORCE_RECONSTRUCT", raising=False)
+    ext = _ext()
+    from vllm_exl3_sm86.ops import call_exl3_gemm, call_exl3_mgemm, ext_has_mgemm
+
+    if not ext_has_mgemm():
+        pytest.skip("exllamav3_ext does not export exl3_mgemm")
+    device = torch.device("cuda")
+    x, trellis0, suh0, svh0 = _payloads(4, m, torch.float16, device, seed=0)
+    _, trellis1, suh1, svh1 = _payloads(4, m, torch.float16, device, seed=1)
+    n = trellis0.shape[1] * TRELLIS_TILE
+    k = x.shape[-1]
+    ref = torch.cat(
+        [
+            call_exl3_gemm(x, trellis0, suh0, svh0, False, False),
+            call_exl3_gemm(x, trellis1, suh1, svh1, False, False),
+        ],
+        dim=-1,
+    )
+    ptrs_trellis = torch.tensor(
+        [int(trellis0.data_ptr()), int(trellis1.data_ptr())],
+        dtype=torch.int64,
+        device=device,
+    )
+    ptrs_suh = torch.tensor(
+        [int(suh0.data_ptr()), int(suh1.data_ptr())],
+        dtype=torch.int64,
+        device=device,
+    )
+    ptrs_svh = torch.tensor(
+        [int(svh0.data_ptr()), int(svh1.data_ptr())],
+        dtype=torch.int64,
+        device=device,
+    )
+    out = torch.empty((2, m, n), dtype=torch.float16, device=device)
+    x_had = torch.empty((2, m, k), dtype=torch.float16, device=device)
+    call_exl3_mgemm(
+        x.view(1, m, k),
+        ptrs_trellis,
+        ptrs_suh,
+        ptrs_svh,
+        4,
+        False,
+        False,
+        out,
+        x_had,
+    )
+    got = torch.cat((out[0], out[1]), dim=-1)
+    torch.cuda.synchronize()
+    if not torch.equal(got, ref) and not torch.allclose(got, ref, rtol=0, atol=1e-3):
+        max_err = (got.float() - ref.float()).abs().max().item()
+        pytest.fail(f"mgemm vs two gemms M={m} max_err={max_err}")
