@@ -75,6 +75,7 @@ TOKENIZER_MODE="${TOKENIZER_MODE:-hf}"
 CONFIG_FORMAT="auto"
 LOAD_FORMAT="auto"
 QUANTIZATION="exl3"
+DTYPE="${EXL3_DTYPE:-auto}"
 
 REASONING_PARSER="${REASONING_PARSER:-}"
 REASONING_CONFIG="${REASONING_CONFIG:-}"
@@ -102,7 +103,7 @@ VLLM_ARGS=(
   --tokenizer-mode "$TOKENIZER_MODE"
   --config-format "$CONFIG_FORMAT"
   --load-format "$LOAD_FORMAT"
-  --dtype auto
+  --dtype "$DTYPE"
   --quantization "$QUANTIZATION"
   --disable-custom-all-reduce
 )
@@ -144,6 +145,7 @@ echo "  TP_SIZE=$TP_SIZE"
 echo "  MAX_MODEL_LEN=$MAX_MODEL_LEN"
 echo "  GPU_MEMORY_UTILIZATION=$GPU_MEMORY_UTILIZATION"
 echo "  ENFORCE_EAGER=$ENFORCE_EAGER"
+echo "  DTYPE=$DTYPE"
 if [[ "$ENFORCE_EAGER" != "1" ]]; then
   echo "  VLLM_EXL3_ALLOW_GRAPHS=$VLLM_EXL3_ALLOW_GRAPHS"
   echo "  COMPILATION_CONFIG=$COMPILATION_CONFIG"
