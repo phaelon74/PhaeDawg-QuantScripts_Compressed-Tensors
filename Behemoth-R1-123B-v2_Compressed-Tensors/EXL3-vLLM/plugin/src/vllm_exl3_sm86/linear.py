@@ -16,6 +16,7 @@ from vllm.model_executor.layers.linear import (
 )
 
 from .constants import HADAMARD_BLOCK, MCG_SENTINEL, MUL1_SENTINEL, TRELLIS_TILE
+from .nvtx import nvtx_range
 from .ops import call_exl3_gemm
 from .parameter import Exl3Parameter, exl3_weight_loader
 from .slicing import (
@@ -136,15 +137,17 @@ class Exl3LinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         original_shape = x.shape[:-1]
         original_dtype = x.dtype
-        x_2d = x.reshape(-1, x.shape[-1]).to(torch.float16).contiguous()
-        outputs = [
-            self._apply_one(layer, x_2d, shard_id) for shard_id in layer.exl3_shard_ids
-        ]
-        output = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
-        if bias is not None:
-            output = output + bias.to(dtype=output.dtype)
-        output = output.reshape(*original_shape, output.shape[-1])
-        return output if output.dtype == original_dtype else output.to(original_dtype)
+        with nvtx_range("exl3.apply"):
+            x_2d = x.reshape(-1, x.shape[-1]).to(torch.float16).contiguous()
+            outputs = [
+                self._apply_one(layer, x_2d, shard_id)
+                for shard_id in layer.exl3_shard_ids
+            ]
+            output = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+            if bias is not None:
+                output = output + bias.to(dtype=output.dtype)
+            output = output.reshape(*original_shape, output.shape[-1])
+            return output if output.dtype == original_dtype else output.to(original_dtype)
 
     @classmethod
     def _materialize_legacy_hadamard(cls, layer: torch.nn.Module) -> None:

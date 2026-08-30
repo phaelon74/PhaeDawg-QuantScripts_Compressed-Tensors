@@ -55,7 +55,11 @@ BEHEMOTH_TP4_SHAPES = {
     "lm_head": (12288, 8192),
 }
 
-DECODER_BITRATES = (3, 4)
+# ArtusDev 4.25-bpw uses mixed K=3/4/5. Local 4.5 mul1 is K=3/4 only.
+DECODER_BITRATES = (3, 4, 5)
 HEAD_BITRATE = 6
+# (mcg, mul1). Implicit 3inst is (False, False); MUL1 INT8 is (False, True).
+CODEBOOK_FLAGS = ((False, False), (False, True))
 MICROBENCH_M = (1, 2, 4, 8, 16, 32, 64, 128, 144, 256, 512, 1024, 4096)
+DECODE_MICROBENCH_M = (1, 2, 4)
 GRAPH_CAPTURE_SIZES = (1, 2, 4)

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from vllm_exl3_sm86.graph import graphs_allowed
@@ -26,8 +24,14 @@ def test_prewarm_touches_capture_sizes():
     from vllm_exl3_sm86.graph import prewarm_behemoth_tp4
 
     try:
-        receipts = prewarm_behemoth_tp4(torch.device("cuda"), capture_sizes=(1,), bitrates=(3,))
+        receipts = prewarm_behemoth_tp4(
+            torch.device("cuda"),
+            capture_sizes=(1,),
+            bitrates=(3,),
+            codebooks=((False, False),),
+        )
     except RuntimeError as exc:
         pytest.skip(str(exc))
     assert receipts
     assert {row["m"] for row in receipts} == {1}
+    assert all(row["mul1"] is False and row["mcg"] is False for row in receipts)

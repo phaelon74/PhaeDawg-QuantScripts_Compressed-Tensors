@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,10 +42,56 @@ def _bytes(path: Path) -> int:
     return total
 
 
+def _profile_errors(
+    profile: str,
+    bitrates: Counter,
+    codebooks: Counter,
+    count: int,
+    size: int,
+) -> list[str]:
+    errors: list[str] = []
+    gib = size / (1024**3)
+    if profile == "inventory":
+        return errors
+    if profile == "mul1-behemoth":
+        if set(bitrates) - {3, 4}:
+            errors.append(f"decoder bitrates should be K3/K4, got {dict(bitrates)}")
+        if codebooks.get("mul1", 0) != count:
+            errors.append(f"expected all mul1 markers, got {dict(codebooks)}")
+        if gib < 40 or gib > 70:
+            errors.append(f"size {gib:.2f} GiB is outside 40-70 GiB; verify")
+        return errors
+    if profile == "artusdev-4p25":
+        if set(bitrates) - {3, 4, 5}:
+            errors.append(
+                f"ArtusDev 4.25 decoder bitrates should be K3/K4/K5, got {dict(bitrates)}"
+            )
+        if {3, 4, 5} - set(bitrates):
+            errors.append(
+                f"ArtusDev 4.25 must include K3, K4, and K5, got {dict(bitrates)}"
+            )
+        if codebooks.get("none", 0) != count:
+            errors.append(
+                f"ArtusDev 4.25 should be implicit 3inst (no mul1/mcg), got {dict(codebooks)}"
+            )
+        if gib < 55 or gib > 68:
+            errors.append(f"size {gib:.2f} GiB is outside the 4.25 ~62 GiB band; verify")
+        return errors
+    errors.append(f"unknown profile {profile}")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint")
     parser.add_argument("--allow-non-behemoth", action="store_true")
+    parser.add_argument(
+        "--profile",
+        choices=("mul1-behemoth", "artusdev-4p25", "inventory"),
+        default="mul1-behemoth",
+        help="mul1-behemoth is the local 4.5 conversion. artusdev-4p25 is the "
+        "serving candidate (implicit 3inst, mixed K3/K4/K5).",
+    )
     parser.add_argument("--sha-manifest", default="")
     args = parser.parse_args()
     ckpt = Path(args.checkpoint)
@@ -60,6 +106,7 @@ def main() -> int:
     head = None
     bitrates = Counter()
     codebooks = Counter()
+    leaf_bitrates: dict[str, Counter[int]] = defaultdict(Counter)
     for prefix, entry in storage.items():
         if entry.get("quant_format") != "exl3":
             continue
@@ -77,13 +124,19 @@ def main() -> int:
         elif leaf in DECODER_LEAVES:
             decoder.append(prefix)
             bitrates[bitrate] += 1
+            leaf_bitrates[leaf][bitrate] += 1
     size = _bytes(ckpt)
+    leaf_bitrate_dict = {
+        leaf: dict(sorted(counts.items())) for leaf, counts in sorted(leaf_bitrates.items())
+    }
     print(f"exl3_records={count}")
     print(f"decoder_linears={len(decoder)}")
-    print(f"decoder_bitrates={dict(bitrates)}")
+    print(f"decoder_bitrates={dict(sorted(bitrates.items()))}")
+    print(f"decoder_leaf_bitrates={leaf_bitrate_dict}")
     print(f"codebooks={dict(codebooks)}")
     print(f"lm_head={head}")
     print(f"bytes={size} ({size / (1024**3):.2f} GiB)")
+    print(f"profile={args.profile}")
     errors = []
     if not args.allow_non_behemoth:
         if len(decoder) != BEHEMOTH_DECODER_LINEARS:
@@ -92,32 +145,28 @@ def main() -> int:
             )
         if head is None or head["bitrate"] != HEAD_BITRATE:
             errors.append(f"expected H6 lm_head, got {head}")
-        if set(bitrates) - {3, 4}:
-            errors.append(f"decoder bitrates should be K3/K4, got {dict(bitrates)}")
-        if codebooks.get("mul1", 0) != count:
-            errors.append(f"expected all mul1 markers, got {dict(codebooks)}")
-        if size < 40 * 1024**3 or size > 70 * 1024**3:
-            errors.append(
-                f"size {size / (1024**3):.2f} GiB is outside the expected low-50s range; verify"
-            )
-    if errors:
-        print("INVALID:", *errors, sep="\n  ", file=sys.stderr)
-        return 1
+        errors.extend(_profile_errors(args.profile, bitrates, codebooks, count, size))
     if args.sha_manifest:
         Path(args.sha_manifest).write_text(
             json.dumps(
                 {
                     "checkpoint": str(ckpt),
+                    "profile": args.profile,
                     "bytes": size,
                     "decoder_linears": len(decoder),
                     "head": head,
-                    "bitrates": dict(bitrates),
+                    "bitrates": dict(sorted(bitrates.items())),
+                    "decoder_leaf_bitrates": leaf_bitrate_dict,
                     "codebooks": dict(codebooks),
+                    "errors": errors,
                 },
                 indent=2,
             )
             + "\n"
         )
+    if errors:
+        print("INVALID:", *errors, sep="\n  ", file=sys.stderr)
+        return 1
     print("OK")
     return 0
 

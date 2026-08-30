@@ -11,6 +11,7 @@ from typing import Any
 import torch
 
 from .constants import DEFAULT_RECONSTRUCT_M, FUSED_RECONSTRUCT_M, TRELLIS_TILE
+from .nvtx import nvtx_range
 from .prefill import reconstruct_hgemm, reconstruct_threshold_for_shape
 
 _EXL3_EXT: Any | None = None
@@ -93,18 +94,19 @@ def _compressed_gemm(
         device=x.device,
     )
     x_had = torch.empty_like(x)
-    ext.exl3_gemm(
-        x,
-        trellis,
-        output,
-        suh,
-        x_had,
-        svh,
-        -1,
-        mcg,
-        mul1,
-        0,
-    )
+    with nvtx_range("exl3.gemm"):
+        ext.exl3_gemm(
+            x,
+            trellis,
+            output,
+            suh,
+            x_had,
+            svh,
+            -1,
+            mcg,
+            mul1,
+            0,
+        )
     return output
 
 
@@ -124,9 +126,10 @@ def exl3_gemm_impl(
     bitrate = int(trellis.shape[2] // TRELLIS_TILE)
     if _should_reconstruct(m, k, n, bitrate):
         fused = m >= FUSED_RECONSTRUCT_M
-        return reconstruct_hgemm(
-            x, trellis, suh, svh, mcg=mcg, mul1=mul1, fused=fused
-        )
+        with nvtx_range("exl3.reconstruct"):
+            return reconstruct_hgemm(
+                x, trellis, suh, svh, mcg=mcg, mul1=mul1, fused=fused
+            )
     return _compressed_gemm(x, trellis, suh, svh, mcg, mul1)
 
 

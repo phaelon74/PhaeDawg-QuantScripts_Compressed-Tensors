@@ -16,6 +16,7 @@ import torch
 
 from .constants import (
     BEHEMOTH_TP4_SHAPES,
+    CODEBOOK_FLAGS,
     DECODER_BITRATES,
     GRAPH_CAPTURE_SIZES,
     HEAD_BITRATE,
@@ -54,15 +55,21 @@ def prewarm_behemoth_tp4(
     *,
     capture_sizes: Iterable[int] = GRAPH_CAPTURE_SIZES,
     bitrates: Iterable[int] = (*DECODER_BITRATES, HEAD_BITRATE),
-) -> list[dict[str, int]]:
-    """Touch every production shape so autotune cannot run during capture."""
+    codebooks: Iterable[tuple[bool, bool]] = CODEBOOK_FLAGS,
+) -> list[dict[str, int | bool]]:
+    """Touch every production shape so autotune cannot run during capture.
+
+    Autotune keys include codebook flags. ArtusDev 4.25 is implicit 3inst
+    (`mcg=False`, `mul1=False`); prewarming only `mul1=True` leaves the
+    serving kernels cold.
+    """
     if device is None:
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is required to prewarm EXL3 kernels")
         device = torch.device("cuda", torch.cuda.current_device())
     shapes = list(BEHEMOTH_TP4_SHAPES.values())
     preallocate_workspaces(device, shapes)
-    receipts: list[dict[str, int]] = []
+    receipts: list[dict[str, int | bool]] = []
     for name, (k, n) in BEHEMOTH_TP4_SHAPES.items():
         if name == "lm_head":
             shape_bitrates = (HEAD_BITRATE,)
@@ -71,11 +78,20 @@ def prewarm_behemoth_tp4(
                 DECODER_BITRATES
             )
         for bitrate in shape_bitrates:
-            for m in capture_sizes:
-                x, trellis, suh, svh = _dummy_payloads(device, k, n, bitrate, m)
-                call_exl3_gemm(x, trellis, suh, svh, mcg=False, mul1=True)
-                receipts.append(
-                    {"name": name, "k": k, "n": n, "bitrate": bitrate, "m": int(m)}
-                )
+            for mcg, mul1 in codebooks:
+                for m in capture_sizes:
+                    x, trellis, suh, svh = _dummy_payloads(device, k, n, bitrate, m)
+                    call_exl3_gemm(x, trellis, suh, svh, mcg=mcg, mul1=mul1)
+                    receipts.append(
+                        {
+                            "name": name,
+                            "k": k,
+                            "n": n,
+                            "bitrate": bitrate,
+                            "m": int(m),
+                            "mcg": bool(mcg),
+                            "mul1": bool(mul1),
+                        }
+                    )
     torch.cuda.synchronize(device)
     return receipts
