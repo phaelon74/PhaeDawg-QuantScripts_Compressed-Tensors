@@ -83,3 +83,16 @@ def test_mgemm_disable_env(monkeypatch):
 def test_custom_op_registers_mgemm_out():
     register_custom_op()
     assert hasattr(torch.ops.vllm, "exl3_mgemm_out")
+    assert hasattr(torch.ops.vllm, "exl3_packed_pair")
+
+
+def test_apply_does_not_specialize_token_count():
+    import inspect
+
+    from vllm_exl3_sm86.linear import Exl3LinearMethod
+
+    src = inspect.getsource(Exl3LinearMethod.apply)
+    assert "in mgemm" not in src
+    assert "shape[0] in" not in src
+    packed_src = inspect.getsource(Exl3LinearMethod._apply_packed_pair)
+    assert "shape[0]" not in packed_src

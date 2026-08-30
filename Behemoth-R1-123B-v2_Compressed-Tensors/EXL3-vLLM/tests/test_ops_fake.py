@@ -21,3 +21,4 @@ def test_custom_op_registers_without_cuda_extension():
     assert hasattr(torch.ops.vllm, "exl3_gemm")
     assert hasattr(torch.ops.vllm, "exl3_gemm_out")
     assert hasattr(torch.ops.vllm, "exl3_mgemm_out")
+    assert hasattr(torch.ops.vllm, "exl3_packed_pair")

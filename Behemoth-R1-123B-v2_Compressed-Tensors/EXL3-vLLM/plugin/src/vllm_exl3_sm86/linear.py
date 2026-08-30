@@ -24,7 +24,7 @@ from .constants import (
 )
 from .grouped import enable_mgemm_if_eligible
 from .nvtx import nvtx_range
-from .ops import call_exl3_gemm, call_exl3_mgemm
+from .ops import call_exl3_gemm, call_exl3_packed_pair
 from .parameter import Exl3Parameter, exl3_weight_loader
 from .slicing import (
     ShardId,
@@ -148,13 +148,10 @@ class Exl3LinearMethod(LinearMethodBase):
         original_dtype = x.dtype
         with nvtx_range("exl3.apply"):
             x_2d = x.reshape(-1, x.shape[-1]).to(torch.float16).contiguous()
-            mgemm_ws = getattr(layer, "exl3_mgemm_out_ws", None)
-            if (
-                getattr(layer, "exl3_use_mgemm", False)
-                and mgemm_ws is not None
-                and x_2d.shape[0] in mgemm_ws
-            ):
-                output = self._apply_mgemm(layer, x_2d)
+            # Layer flag is constant. Do not branch on x_2d.shape[0] here:
+            # Dynamo would specialize the compile range to the profile-run M.
+            if getattr(layer, "exl3_use_mgemm", False):
+                output = self._apply_packed_pair(layer, x_2d)
             else:
                 outputs = [
                     self._apply_one(layer, x_2d, shard_id)
@@ -318,36 +315,37 @@ class Exl3LinearMethod(LinearMethodBase):
             )
 
     @staticmethod
-    def _apply_mgemm(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
-        m = int(x.shape[0])
-        packed_k = int(layer.exl3_mgemm_k)
-        if x.shape[-1] > packed_k:
-            raise ValueError(
-                f"EXL3 input width {x.shape[-1]} exceeds packed K={packed_k}"
-            )
-        if x.shape[-1] < packed_k:
-            padded = layer.exl3_mgemm_x_ws[m]
-            padded.zero_()
-            padded[:, : x.shape[-1]].copy_(x)
-            x = padded
-        out = layer.exl3_mgemm_out_ws[m]
-        packed = layer.exl3_mgemm_packed_ws[m]
-        call_exl3_mgemm(
-            x.view(1, m, packed_k),
+    def _apply_packed_pair(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+        s0, s1 = layer.exl3_mgemm_shards
+        return call_exl3_packed_pair(
+            x,
+            layer.trellis.exl3_tensors[s0],
+            layer.suh.exl3_tensors[s0],
+            layer.svh.exl3_tensors[s0],
+            layer.trellis.exl3_tensors[s1],
+            layer.suh.exl3_tensors[s1],
+            layer.svh.exl3_tensors[s1],
+            layer.exl3_mgemm_mcg,
+            layer.exl3_mgemm_mul1,
+            layer.exl3_mgemm_bitrate,
+            Exl3LinearMethod._output_shard_size(layer, s0),
+            Exl3LinearMethod._output_shard_size(layer, s1),
             layer.exl3_mgemm_ptrs_trellis,
             layer.exl3_mgemm_ptrs_suh,
             layer.exl3_mgemm_ptrs_svh,
-            layer.exl3_mgemm_bitrate,
-            layer.exl3_mgemm_mcg,
-            layer.exl3_mgemm_mul1,
-            out,
-            layer.exl3_mgemm_xhad_ws[m],
+            layer.exl3_mgemm_out_ws[1],
+            layer.exl3_mgemm_xhad_ws[1],
+            layer.exl3_mgemm_packed_ws[1],
+            layer.exl3_mgemm_x_ws[1],
+            layer.exl3_mgemm_out_ws[2],
+            layer.exl3_mgemm_xhad_ws[2],
+            layer.exl3_mgemm_packed_ws[2],
+            layer.exl3_mgemm_x_ws[2],
+            layer.exl3_mgemm_out_ws[4],
+            layer.exl3_mgemm_xhad_ws[4],
+            layer.exl3_mgemm_packed_ws[4],
+            layer.exl3_mgemm_x_ws[4],
         )
-        n0 = Exl3LinearMethod._output_shard_size(layer, layer.exl3_mgemm_shards[0])
-        n1 = Exl3LinearMethod._output_shard_size(layer, layer.exl3_mgemm_shards[1])
-        packed[:, :n0].copy_(out[0, :, :n0])
-        packed[:, n0 : n0 + n1].copy_(out[1, :, :n1])
-        return packed[:, : n0 + n1]
 
     @staticmethod
     def _apply_one(
