@@ -9,9 +9,10 @@ Upstream pin: `0c49587a7c235e6303a6bbedc8b665272ad3a2ea`
 
 What the overlay changes:
 
-1. **QTIP GEMV eligibility** (`exl3_gemv.cu`): K=2..8, implicit 3inst (cb=0)
-   when `EXL3_GEMV>=2` or `EXL3_GEMV_3INST=1`, plus compiled instances for
-   those shapes.
+1. **QTIP GEMV eligibility** (`exl3_gemv.cu`): implicit 3inst (cb=0) at
+   K=2 and K=3 when `EXL3_GEMV>=2` or `EXL3_GEMV_3INST=1`. K=4 3inst is
+   already eligible upstream. The GEMV kernel `static_assert`s 2/3/4 bpw
+   only — do not instantiate K=5..8.
 2. **16-bit codebook LUT fill** (`exl3_decode_lut.cu`): 65536 fp16 entries
    per codebook in global memory. Compiled but not invoked yet: without
    `-rdc`, nvcc treats `extern __constant__` as a per-translation-unit

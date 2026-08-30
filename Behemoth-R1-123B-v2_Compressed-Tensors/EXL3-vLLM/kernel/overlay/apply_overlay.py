@@ -15,7 +15,7 @@ OVERLAY_DIR = Path(__file__).resolve().parent
 
 GEMV_K_GUARD_OLD = "if (K < 2 || K > 4) return -1;"
 GEMV_K_GUARD_NEW = (
-    f"if (K < 2 || K > 8) return -1; // {MARKER}: K=5..8 GEMV instances"
+    f"if (K < 2 || K > 4) return -1; // {MARKER}: GEMV kernel is 2/3/4 bpw only"
 )
 GEMV_CB_GUARD_OLD = "if (K != 4 && cb == 0) return -1;"
 GEMV_CB_GUARD_NEW = (
@@ -27,18 +27,16 @@ GEMV_SELECT_OLD = """ SEL_GRID(4, 0, false) SEL_GRID(4, 1, false) SEL_GRID(4, 2,
  SEL_GRID(2, 1, false) SEL_GRID(2, 2, false) SEL_GRID(2, 1, true) SEL_GRID(2, 2, true)
  SEL_GRID(3, 1, false) SEL_GRID(3, 2, false) SEL_GRID(3, 1, true) SEL_GRID(3, 2, true)"""
 
+# QTIP GEMV (exl3_gemv_kernel.cuh) static_asserts bits in {2,3,4}. Instantiating
+# K=5..8 fails nvcc. Add 3inst (cb=0) instances for K=2 and K=3 only.
 GEMV_SELECT_NEW = f""" SEL_GRID(4, 0, false) SEL_GRID(4, 1, false) SEL_GRID(4, 2, false)
  SEL_GRID(2, 0, false) SEL_GRID(2, 1, false) SEL_GRID(2, 2, false) SEL_GRID(2, 1, true) SEL_GRID(2, 2, true)
  SEL_GRID(3, 0, false) SEL_GRID(3, 1, false) SEL_GRID(3, 2, false) SEL_GRID(3, 1, true) SEL_GRID(3, 2, true)
- SEL_GRID(5, 0, false) SEL_GRID(5, 1, false) SEL_GRID(5, 2, false)
- SEL_GRID(6, 0, false) SEL_GRID(6, 1, false) SEL_GRID(6, 2, false)
- SEL_GRID(7, 0, false) SEL_GRID(7, 1, false) SEL_GRID(7, 2, false)
- SEL_GRID(8, 0, false) SEL_GRID(8, 1, false) SEL_GRID(8, 2, false)
- /* {MARKER}: 3inst K=5..8 + cb=0 for K=2,3 */"""
+ /* {MARKER}: 3inst cb=0 for K=2,3; K=5..8 not instantiated */"""
 
 GEMV_HELPER = (
-    f"\n// {MARKER}: allow implicit 3inst GEMV (cb=0) beyond K=4 when "
-    f"EXL3_GEMV>=2 or EXL3_GEMV_3INST=1\n"
+    f"\n// {MARKER}: allow implicit 3inst GEMV (cb=0) at K=2,3 when "
+    f"EXL3_GEMV>=2 or EXL3_GEMV_3INST=1. K=4 3inst is already eligible.\n"
     "static bool exl3_gemv_allow_3inst()\n"
     "{\n"
     '    const char* force = std::getenv("EXL3_GEMV_3INST");\n'
@@ -94,15 +92,27 @@ def apply(src: Path) -> None:
         if needle not in text:
             raise SystemExit(f"{gemv}: missing exl3_gemv_env_mode")
         text = text.replace(needle, GEMV_HELPER + "\n" + needle, 1)
-    text = text.replace(GEMV_K_GUARD_OLD, GEMV_K_GUARD_NEW)
+    # Revert leftover K=5..8 eligibility from the previous overlay.
     text = text.replace(
-        "if (K < 2 || K > 4) return false;",
-        f"if (K < 2 || K > 8) return false; // {MARKER}",
+        f"if (K < 2 || K > 8) return -1; // {MARKER}: K=5..8 GEMV instances",
+        GEMV_K_GUARD_NEW,
     )
+    text = text.replace(
+        f"if (K < 2 || K > 8) return false; // {MARKER}",
+        "if (K < 2 || K > 4) return false;",
+    )
+    if GEMV_K_GUARD_OLD in text:
+        text = text.replace(GEMV_K_GUARD_OLD, GEMV_K_GUARD_NEW)
     # two copies of the cb/k guards (cfg + try_launch)
     if GEMV_CB_GUARD_OLD in text:
         text = text.replace(GEMV_CB_GUARD_OLD, GEMV_CB_GUARD_NEW)
-    if "SEL_GRID(5, 0" not in text:
+    for k in (5, 6, 7, 8):
+        text = text.replace(
+            f" SEL_GRID({k}, 0, false) SEL_GRID({k}, 1, false) "
+            f"SEL_GRID({k}, 2, false)\n",
+            "",
+        )
+    if "SEL_GRID(2, 0" not in text:
         if GEMV_SELECT_OLD in text:
             text = text.replace(GEMV_SELECT_OLD, GEMV_SELECT_NEW, 1)
         elif "SEL_GRID(4, 0, false)" in text:
