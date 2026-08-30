@@ -28,7 +28,7 @@ export OMP_NUM_THREADS=8
 # EXL3 plugin and native SM86 extension. The guard override is required for
 # the tested Torch 2.13.0+cu132 / vLLM b99dae944 stack until the historical
 # constants are replaced with a multi-stack manifest.
-export VLLM_PLUGINS="${VLLM_PLUGINS:-vllm_exl3_sm86}"
+export VLLM_PLUGINS="vllm_exl3_sm86"
 export VLLM_EXL3_EXT_PATH="${VLLM_EXL3_EXT_PATH:-$EXL3_ROOT/build/exllamav3_ext}"
 export VLLM_EXL3_SKIP_VERSION_GUARD="${VLLM_EXL3_SKIP_VERSION_GUARD:-1}"
 export VLLM_EXL3_CROSSOVER_JSON="${VLLM_EXL3_CROSSOVER_JSON:-$EXL3_ROOT/manifests/sm86_crossover.json}"
@@ -43,9 +43,11 @@ if [[ -z "$API_KEY" ]]; then
   exit 2
 fi
 
-MODEL_DIR="${MODEL_DIR:-/media/fmodels/ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3/4.25bpw_H6}"
-SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Behemoth-R1-123B-v2-EXL3-4.25-H6}"
-TOKENIZER="${TOKENIZER:-$MODEL_DIR}"
+# Use EXL3-specific override names so stale MODEL_DIR/TOKENIZER exports from
+# conversion or KLD sessions cannot silently select another checkpoint.
+MODEL_DIR="${EXL3_MODEL_DIR:-/media/fmodels/ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3/4.25bpw_H6}"
+SERVED_MODEL_NAME="${EXL3_SERVED_MODEL_NAME:-Behemoth-R1-123B-v2-EXL3-4.25-H6}"
+TOKENIZER="${EXL3_TOKENIZER:-$MODEL_DIR}"
 
 if [[ ! -f "$MODEL_DIR/config.json" ]]; then
   echo "Missing model config: $MODEL_DIR/config.json" >&2
@@ -79,9 +81,9 @@ ENABLE_TOOL_CALLING="${ENABLE_TOOL_CALLING:-0}"
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-mistral}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 
-# Eager is the proven configuration for EXL3. CUDA graphs are opt-in only
-# after model-specific prewarm and capture/replay testing.
-ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
+# Production performance mode: CUDA graphs enabled, eager disabled.
+# Set EXL3_ENFORCE_EAGER=1 only for correctness/KLD diagnostics.
+ENFORCE_EAGER="${EXL3_ENFORCE_EAGER:-0}"
 
 VLLM_ARGS=(
   "$MODEL_DIR"
@@ -108,9 +110,9 @@ if [[ "$ENFORCE_EAGER" == "1" ]]; then
   unset VLLM_EXL3_ALLOW_GRAPHS
   VLLM_ARGS+=(--enforce-eager)
 else
-  CUDAGRAPH_MODE="${CUDAGRAPH_MODE:-full_decode_only}"
-  CUDAGRAPH_CAPTURE_SIZES="${CUDAGRAPH_CAPTURE_SIZES:-[1,2,4]}"
-  COMPILATION_CONFIG="${COMPILATION_CONFIG:-{\"mode\":3,\"cudagraph_mode\":\"${CUDAGRAPH_MODE}\",\"cudagraph_capture_sizes\":${CUDAGRAPH_CAPTURE_SIZES}}}"
+  CUDAGRAPH_MODE="${EXL3_CUDAGRAPH_MODE:-full_decode_only}"
+  CUDAGRAPH_CAPTURE_SIZES="${EXL3_CUDAGRAPH_CAPTURE_SIZES:-[1,2,4]}"
+  COMPILATION_CONFIG="${EXL3_COMPILATION_CONFIG:-{\"mode\":3,\"cudagraph_mode\":\"${CUDAGRAPH_MODE}\",\"cudagraph_capture_sizes\":${CUDAGRAPH_CAPTURE_SIZES}}}"
   export VLLM_EXL3_ALLOW_GRAPHS=1
   VLLM_ARGS+=(--compilation-config "$COMPILATION_CONFIG")
 fi
@@ -140,6 +142,10 @@ echo "  TP_SIZE=$TP_SIZE"
 echo "  MAX_MODEL_LEN=$MAX_MODEL_LEN"
 echo "  GPU_MEMORY_UTILIZATION=$GPU_MEMORY_UTILIZATION"
 echo "  ENFORCE_EAGER=$ENFORCE_EAGER"
+if [[ "$ENFORCE_EAGER" != "1" ]]; then
+  echo "  VLLM_EXL3_ALLOW_GRAPHS=$VLLM_EXL3_ALLOW_GRAPHS"
+  echo "  COMPILATION_CONFIG=$COMPILATION_CONFIG"
+fi
 echo
 
 vllm serve "${VLLM_ARGS[@]}"

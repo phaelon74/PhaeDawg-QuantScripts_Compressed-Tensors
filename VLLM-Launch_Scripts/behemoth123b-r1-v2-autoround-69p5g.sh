@@ -40,9 +40,11 @@ if [[ -z "$API_KEY" ]]; then
   exit 2
 fi
 
-MODEL_DIR="${MODEL_DIR:-/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/AutoRound_GS32_Mixed_69p5G}"
-SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Behemoth-R1-123B-v2-AutoRound-GS32-Mixed-69p5G}"
-TOKENIZER="${TOKENIZER:-$MODEL_DIR}"
+# Backend-specific names prevent stale MODEL_DIR/TOKENIZER exports from an
+# EXL3 or conversion session from silently selecting the wrong checkpoint.
+MODEL_DIR="${AUTOROUND_MODEL_DIR:-/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/AutoRound_GS32_Mixed_69p5G}"
+SERVED_MODEL_NAME="${AUTOROUND_SERVED_MODEL_NAME:-Behemoth-R1-123B-v2-AutoRound-GS32-Mixed-69p5G}"
+TOKENIZER="${AUTOROUND_TOKENIZER:-$MODEL_DIR}"
 
 if [[ ! -f "$MODEL_DIR/config.json" ]]; then
   echo "Missing model config: $MODEL_DIR/config.json" >&2
