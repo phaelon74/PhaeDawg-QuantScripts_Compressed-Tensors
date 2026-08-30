@@ -37,6 +37,8 @@ from vllm_exl3_sm86.constants import (  # noqa: E402
     BEHEMOTH_TP4_SHAPES,
     DECODE_MICROBENCH_M,
     MICROBENCH_M,
+    PEAK_DRAM_GBPS_3090,
+    TARGET_DECODE_TOK_S,
 )
 from vllm_exl3_sm86.ops import _load_exl3_ext, call_exl3_gemm  # noqa: E402
 
@@ -54,6 +56,17 @@ DECODER_SHAPES = tuple(name for name in BEHEMOTH_TP4_SHAPES if name != "lm_head"
 
 def _sync():
     torch.cuda.synchronize()
+
+
+def _trellis_bytes(k: int, n: int, bitrate: int) -> int:
+    """Packed weight bytes read once per GEMM (the decode-bandwidth term)."""
+    return (k * n * bitrate) // 8
+
+
+def _gbps(nbytes: int, ms: float) -> float | None:
+    if not (ms == ms) or ms <= 0:
+        return None
+    return (nbytes / (ms * 1e-3)) / 1e9
 
 
 def _time_ms(fn, warmup: int, iters: int) -> float:
@@ -248,6 +261,9 @@ def main() -> int:
                             f"plugin={t_plugin:.3f}ms recon={t_recon:.3f}ms "
                             f"limit={gate}x"
                         )
+                trellis_b = _trellis_bytes(k, n, bitrate)
+                native_gbps = _gbps(trellis_b, t_native)
+                plugin_gbps = _gbps(trellis_b, t_plugin)
                 row = {
                     "name": name,
                     "k": k,
@@ -262,6 +278,15 @@ def main() -> int:
                     "exl3_native_persistent_ms": t_native,
                     "reconstruct_ms": t_recon,
                     "fp16_cublas_ms": t_fp16,
+                    "trellis_bytes": trellis_b,
+                    "native_trellis_gbps": native_gbps,
+                    "plugin_trellis_gbps": plugin_gbps,
+                    "peak_dram_gbps": PEAK_DRAM_GBPS_3090,
+                    "native_pct_of_peak": (
+                        None
+                        if native_gbps is None
+                        else 100.0 * native_gbps / PEAK_DRAM_GBPS_3090
+                    ),
                     "max_err": max_err,
                     "ref_max": ref_max,
                     "rel_err": rel_err,
@@ -269,10 +294,14 @@ def main() -> int:
                     "parity_ok": wrap_err == 0,
                 }
                 rows.append(row)
+                gbps_txt = (
+                    f"{native_gbps:7.1f}" if native_gbps is not None else "    nan"
+                )
                 print(
                     f"{name:10} K={bitrate} M={m:4d} {codebook:5}  "
                     f"plugin={t_plugin:8.3f}ms  native={t_native:8.3f}ms  "
                     f"recon={t_recon:8.3f}ms  fp16={t_fp16:8.3f}ms  "
+                    f"gbps={gbps_txt}  "
                     f"err={max_err:.3e} wrap={wrap_err:.3e}"
                 )
 
@@ -339,6 +368,8 @@ def _decode_budget(rows: list[dict]) -> dict[str, object]:
                 "native_tok_s_ceiling": 1000.0 / native_token_ms
                 if native_token_ms
                 else None,
+                "target_30_tok_s_ms": 1000.0 / TARGET_DECODE_TOK_S,
+                "gap_to_30_tok_s_ms": token_ms - (1000.0 / TARGET_DECODE_TOK_S),
                 "target_28_tok_s_ms": 1000.0 / 28.0,
                 "gap_to_28_tok_s_ms": token_ms - (1000.0 / 28.0),
             }

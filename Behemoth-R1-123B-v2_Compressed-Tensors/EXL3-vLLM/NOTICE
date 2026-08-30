@@ -1,7 +1,13 @@
 ExLlamaV3 (https://github.com/turboderp-org/exllamav3) is MIT-licensed.
-This workstream vendors no ExLlamaV3 sources. The vLLM plugin talks to a
-pinned `exllamav3_ext` build. Keep the conversion environment and the vLLM
-runtime environment separate.
+
+This workstream keeps a pinned upstream commit
+(`0c49587a7c235e6303a6bbedc8b665272ad3a2ea`) and applies an SM86 decode
+overlay from `kernel/overlay/` at build time. The intended long-term home
+for those kernel commits is the `phaelon74/exllamav3` fork, branch
+`sm86-decode`, checked out as the `EXL3-vLLM/exllamav3` submodule.
+
+The vLLM plugin talks to the resulting `exllamav3_ext` build. Keep the
+conversion environment and the vLLM runtime environment separate.
 
 Dense EXL3 vLLM glue is adapted from the dense subset of
 https://github.com/local-inference-lab/vllm/pull/139 (Apache-2.0).

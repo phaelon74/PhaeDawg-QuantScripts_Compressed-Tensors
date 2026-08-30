@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "name": "sm86-decode-operating-guide",
+  "target_tok_s": 30,
+  "capture_sizes": [1, 2, 3, 4, 5, 6, 8],
+  "kld_limit": 0.0166,
+  "prefill_min_tok_s": 320,
+  "kernel_env": {
+    "EXL3_GEMV": "2 recommended after overlay; 0 disables QTIP GEMV",
+    "EXL3_GEMV_3INST": "1 allows cb=0 GEMV at K!=4",
+    "EXL3_GEMV_LUT": "1 default after overlay; 0 is arithmetic 3INST",
+    "EXL3_INT8_GEMV_CB": "0 default; 1 is KLD-gated 3inst int8 activations"
+  },
+  "spec_decode": {
+    "ngram": "EXL3_NGRAM_SPEC=1 EXL3_NGRAM_TOKENS=3",
+    "draft": "verify_draft_tokenizer.py then EXL3_SPECULATIVE_CONFIG"
+  },
+  "overlay": "kernel/overlay",
+  "fork": {
+    "url": "https://github.com/phaelon74/exllamav3",
+    "branch": "sm86-decode",
+    "upstream_pin": "0c49587a7c235e6303a6bbedc8b665272ad3a2ea"
+  }
+}

@@ -257,12 +257,16 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=1
 export TORCH_CUDA_ARCH_LIST=8.6
 export EXLLAMAV3_SRC=${EXLLAMAV3_SRC:-$HOME/src/exllamav3}
+./scripts/fork_exllamav3.sh    # optional: submodule at $EXL3/exllamav3
 ./scripts/build_exllamav3_ext.sh
 ```
 
-The script clones/checkouts ExLlamaV3 `0c49587a7c235e6303a6bbedc8b665272ad3a2ea`,
+The script prefers `$EXL3/exllamav3` if that submodule exists, otherwise clones
+ExLlamaV3 `0c49587a7c235e6303a6bbedc8b665272ad3a2ea`, applies
+`kernel/overlay/` (LUT decode, K=5..8 3inst GEMV, INT8_GEMV_CB gate),
 installs with `--no-build-isolation --no-deps`, and copies `exllamav3_ext*.so`
-to `$EXL3/build/exllamav3_ext`.
+to `$EXL3/build/exllamav3_ext`. Set `EXL3_APPLY_OVERLAY=0` to build vanilla
+upstream.
 
 ```bash
 export VLLM_EXL3_EXT_PATH="$EXL3/build/exllamav3_ext"

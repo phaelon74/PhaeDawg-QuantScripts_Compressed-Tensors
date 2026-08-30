@@ -40,14 +40,19 @@
   },
   "exllamav3": {
     "repo": "https://github.com/turboderp-org/exllamav3",
+    "fork_url": "https://github.com/phaelon74/exllamav3",
+    "fork_branch": "sm86-decode",
+    "fork_commit": null,
+    "upstream_pin": "0c49587a7c235e6303a6bbedc8b665272ad3a2ea",
     "license": "MIT",
     "pinned_commit": "0c49587a7c235e6303a6bbedc8b665272ad3a2ea",
-    "pin_note": "Implementation-time master snapshot. Re-record the exact built SHA after scripts/build_exllamav3_ext.sh.",
+    "pin_note": "Implementation-time master snapshot. Overlay at kernel/overlay is applied at build. Re-record fork_commit after scripts/fork_exllamav3.sh.",
     "conversion_env": "~/exllamav3-convert",
-    "runtime_artifact": "exllamav3_ext only, built against the vLLM Torch/CUDA/Python ABI",
+    "runtime_artifact": "exllamav3_ext only, built against the vLLM Torch/CUDA/Python ABI, SM86 overlay enabled",
     "arch_list": "8.6",
     "native_sass": true,
-    "build_isolation": false
+    "build_isolation": false,
+    "overlay": "kernel/overlay"
   },
   "gpu_serving_target": {
     "count": 4,

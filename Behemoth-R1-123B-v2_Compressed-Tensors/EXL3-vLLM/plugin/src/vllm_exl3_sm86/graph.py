@@ -1,10 +1,10 @@
-"""CUDA-graph prewarm and workspace pinning for capture sizes 1/2/4.
+"""CUDA-graph prewarm and workspace pinning for capture sizes 1-8.
 
 Graphs stay disabled until:
 - eager TP4 continuous batching is correct,
 - every (M, K, N, bitrate, codebook, dtype) used by capture sizes is prewarmed,
 - INT8 / reconstruct / cuBLAS workspaces have stable pointers,
-- 100K capture/replay stress passes.
+- capture/replay stress passes with no allocator traffic during capture.
 """
 
 from __future__ import annotations
@@ -93,52 +93,97 @@ def prewarm_behemoth_tp4(
                         }
                     )
     if ext_has_mgemm():
-        k, n = BEHEMOTH_TP4_SHAPES["gate_proj"]
-        requested = tuple(dict.fromkeys(int(b) for b in bitrates)) or (4,)
-        for bitrate in requested:
-            for mcg, mul1 in codebooks:
-                for m in capture_sizes:
-                    x, trellis0, suh0, svh0 = _dummy_payloads(device, k, n, bitrate, m)
-                    _, trellis1, suh1, svh1 = _dummy_payloads(device, k, n, bitrate, m)
-                    ptrs_trellis = torch.tensor(
-                        [int(trellis0.data_ptr()), int(trellis1.data_ptr())],
-                        dtype=torch.int64,
-                        device=device,
-                    )
-                    ptrs_suh = torch.tensor(
-                        [int(suh0.data_ptr()), int(suh1.data_ptr())],
-                        dtype=torch.int64,
-                        device=device,
-                    )
-                    ptrs_svh = torch.tensor(
-                        [int(svh0.data_ptr()), int(svh1.data_ptr())],
-                        dtype=torch.int64,
-                        device=device,
-                    )
-                    out = torch.empty((2, int(m), n), dtype=torch.float16, device=device)
-                    x_had = torch.empty((2, int(m), k), dtype=torch.float16, device=device)
-                    call_exl3_mgemm(
-                        x.view(1, int(m), k),
-                        ptrs_trellis,
-                        ptrs_suh,
-                        ptrs_svh,
-                        int(bitrate),
-                        bool(mcg),
-                        bool(mul1),
-                        out,
-                        x_had,
-                    )
-                    receipts.append(
-                        {
-                            "name": "gate_up_proj",
-                            "k": k,
-                            "n": n,
-                            "bitrate": bitrate,
-                            "m": int(m),
-                            "mcg": bool(mcg),
-                            "mul1": bool(mul1),
-                            "mgemm": True,
-                        }
-                    )
+        mgemm_shapes = (
+            ("gate_up_proj", BEHEMOTH_TP4_SHAPES["gate_proj"]),
+            ("kv_proj", BEHEMOTH_TP4_SHAPES["k_proj"]),
+        )
+        requested = tuple(dict.fromkeys(int(b) for b in bitrates)) or (4, 5, 6)
+        for name, (k, n) in mgemm_shapes:
+            for bitrate in requested:
+                for mcg, mul1 in codebooks:
+                    for m in capture_sizes:
+                        x, trellis0, suh0, svh0 = _dummy_payloads(
+                            device, k, n, bitrate, m
+                        )
+                        _, trellis1, suh1, svh1 = _dummy_payloads(
+                            device, k, n, bitrate, m
+                        )
+                        ptrs_trellis = torch.tensor(
+                            [int(trellis0.data_ptr()), int(trellis1.data_ptr())],
+                            dtype=torch.int64,
+                            device=device,
+                        )
+                        ptrs_suh = torch.tensor(
+                            [int(suh0.data_ptr()), int(suh1.data_ptr())],
+                            dtype=torch.int64,
+                            device=device,
+                        )
+                        ptrs_svh = torch.tensor(
+                            [int(svh0.data_ptr()), int(svh1.data_ptr())],
+                            dtype=torch.int64,
+                            device=device,
+                        )
+                        out = torch.empty(
+                            (2, int(m), n), dtype=torch.float16, device=device
+                        )
+                        x_had = torch.empty(
+                            (2, int(m), k), dtype=torch.float16, device=device
+                        )
+                        call_exl3_mgemm(
+                            x.view(1, int(m), k),
+                            ptrs_trellis,
+                            ptrs_suh,
+                            ptrs_svh,
+                            int(bitrate),
+                            bool(mcg),
+                            bool(mul1),
+                            out,
+                            x_had,
+                        )
+                        receipts.append(
+                            {
+                                "name": name,
+                                "k": k,
+                                "n": n,
+                                "bitrate": bitrate,
+                                "m": int(m),
+                                "mcg": bool(mcg),
+                                "mul1": bool(mul1),
+                                "mgemm": True,
+                            }
+                        )
     torch.cuda.synchronize(device)
     return receipts
+
+
+def capture_allocated_bytes_delta(
+    device: torch.device,
+    *,
+    bitrate: int = 4,
+    m: int = 1,
+    mcg: bool = False,
+    mul1: bool = False,
+) -> int:
+    """Capture one q_proj graph after prewarm; return allocated-byte delta.
+
+    A positive delta of many megabytes means autotune or the INT8 16 MiB
+    workspace ran inside capture. Callers should prewarm first.
+    """
+    k, n = BEHEMOTH_TP4_SHAPES["q_proj"]
+    x, trellis, suh, svh = _dummy_payloads(device, k, n, bitrate, m)
+    out = torch.empty((m, n), dtype=torch.float16, device=device)
+    x_had = torch.empty((m, k), dtype=torch.float16, device=device)
+    call_exl3_gemm(x, trellis, suh, svh, mcg, mul1, out=out, x_had=x_had)
+    torch.cuda.synchronize(device)
+    before = torch.cuda.memory_allocated(device)
+    graph = torch.cuda.CUDAGraph()
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        with torch.cuda.graph(graph):
+            call_exl3_gemm(x, trellis, suh, svh, mcg, mul1, out=out, x_had=x_had)
+    torch.cuda.current_stream(device).wait_stream(stream)
+    torch.cuda.synchronize(device)
+    after = torch.cuda.memory_allocated(device)
+    del x, trellis, suh, svh, out, x_had, graph
+    return int(after - before)

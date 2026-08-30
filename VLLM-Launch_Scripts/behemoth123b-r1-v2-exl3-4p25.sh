@@ -113,7 +113,7 @@ if [[ "$ENFORCE_EAGER" == "1" ]]; then
   VLLM_ARGS+=(--enforce-eager)
 else
   CUDAGRAPH_MODE="${EXL3_CUDAGRAPH_MODE:-full_decode_only}"
-  CUDAGRAPH_CAPTURE_SIZES="${EXL3_CUDAGRAPH_CAPTURE_SIZES:-[1,2,4]}"
+  CUDAGRAPH_CAPTURE_SIZES="${EXL3_CUDAGRAPH_CAPTURE_SIZES:-[1,2,3,4,5,6,8]}"
   COMPILATION_CONFIG="${EXL3_COMPILATION_CONFIG:-{\"mode\":3,\"cudagraph_mode\":\"${CUDAGRAPH_MODE}\",\"cudagraph_capture_sizes\":${CUDAGRAPH_CAPTURE_SIZES}}}"
   export VLLM_EXL3_ALLOW_GRAPHS=1
   VLLM_ARGS+=(--compilation-config "$COMPILATION_CONFIG")
@@ -132,6 +132,15 @@ if [[ "$TRUST_REMOTE_CODE" == "1" ]]; then
   VLLM_ARGS+=(--trust-remote-code)
 fi
 
+# Speculative decode: EXL3_NGRAM_SPEC=1 or a JSON EXL3_SPECULATIVE_CONFIG.
+# Kernel time is nearly flat in M, so accepted tokens per step are almost free.
+if [[ -z "${EXL3_SPECULATIVE_CONFIG:-}" && "${EXL3_NGRAM_SPEC:-0}" == "1" ]]; then
+  EXL3_SPECULATIVE_CONFIG='{"method":"ngram","num_speculative_tokens":'"${EXL3_NGRAM_TOKENS:-3}"',"prompt_lookup_max":'"${EXL3_NGRAM_LOOKUP_MAX:-5}"',"prompt_lookup_min":'"${EXL3_NGRAM_LOOKUP_MIN:-1}"'}'
+fi
+if [[ -n "${EXL3_SPECULATIVE_CONFIG:-}" ]]; then
+  VLLM_ARGS+=(--speculative-config "$EXL3_SPECULATIVE_CONFIG")
+fi
+
 echo "Launching native EXL3 SM86:"
 echo "  MODEL_DIR=$MODEL_DIR"
 echo "  SERVED_MODEL_NAME=$SERVED_MODEL_NAME"
@@ -146,6 +155,9 @@ echo "  MAX_MODEL_LEN=$MAX_MODEL_LEN"
 echo "  GPU_MEMORY_UTILIZATION=$GPU_MEMORY_UTILIZATION"
 echo "  ENFORCE_EAGER=$ENFORCE_EAGER"
 echo "  DTYPE=$DTYPE"
+if [[ -n "${EXL3_SPECULATIVE_CONFIG:-}" ]]; then
+  echo "  EXL3_SPECULATIVE_CONFIG=$EXL3_SPECULATIVE_CONFIG"
+fi
 if [[ "$ENFORCE_EAGER" != "1" ]]; then
   echo "  VLLM_EXL3_ALLOW_GRAPHS=$VLLM_EXL3_ALLOW_GRAPHS"
   echo "  COMPILATION_CONFIG=$COMPILATION_CONFIG"

@@ -180,6 +180,8 @@ git -C "$VLLM_SRC" checkout \
 git clone https://github.com/turboderp-org/exllamav3.git "$EXLLAMAV3_SRC"
 git -C "$EXLLAMAV3_SRC" checkout \
   0c49587a7c235e6303a6bbedc8b665272ad3a2ea
+# Optional: overlay + fork live under EXL3-vLLM/kernel and scripts/fork_exllamav3.sh
+
 ```
 
 Confirm:
@@ -288,6 +290,7 @@ export EXLLAMAV3_EXT_OUT="$EXL3_WORKSTREAM/build/exllamav3_ext"
 
 cd "$EXL3_WORKSTREAM"
 chmod +x scripts/build_exllamav3_ext.sh
+# Applies kernel/overlay (LUT, 3inst GEMV K=5..8, INT8_GEMV_CB) unless EXL3_APPLY_OVERLAY=0
 ./scripts/build_exllamav3_ext.sh
 ```
 

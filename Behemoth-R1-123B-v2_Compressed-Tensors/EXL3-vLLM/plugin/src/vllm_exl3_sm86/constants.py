@@ -31,6 +31,9 @@ REQUIRED_VLLM_VERSION = "0.1.dev12995+g1f369db5d"
 REQUIRED_TORCH_PREFIX = "2.9.1"
 REQUIRED_CUDA = "13.0"
 PINNED_EXLLAMAV3_COMMIT = "0c49587a7c235e6303a6bbedc8b665272ad3a2ea"
+EXLLAMAV3_UPSTREAM_URL = "https://github.com/turboderp-org/exllamav3"
+EXLLAMAV3_FORK_URL = "https://github.com/phaelon74/exllamav3"
+EXLLAMAV3_FORK_BRANCH = "sm86-decode"
 PINNED_VLLM_GIT_SHA = "1f369db5d5680355e8909df56e77592c55ebdbf9"
 
 # Behemoth-R1-123B-v2 architecture (dense Mistral).
@@ -59,8 +62,12 @@ BEHEMOTH_TP4_SHAPES = {
 # lm_head is independently H6; k_proj/v_proj also use K=6 on 4.25.
 DECODER_BITRATES = (3, 4, 5, 6)
 HEAD_BITRATE = 6
-# (mcg, mul1). Implicit 3inst is (False, False); MUL1 INT8 is (False, True).
-CODEBOOK_FLAGS = ((False, False), (False, True))
+# (mcg, mul1). Implicit 3inst is (False, False); mcg is (True, False); MUL1 is (False, True).
+CODEBOOK_FLAGS = ((False, False), (True, False), (False, True))
 MICROBENCH_M = (1, 2, 4, 8, 16, 32, 64, 128, 144, 256, 512, 1024, 4096)
-DECODE_MICROBENCH_M = (1, 2, 4)
-GRAPH_CAPTURE_SIZES = (1, 2, 4)
+DECODE_MICROBENCH_M = (1, 2, 4, 8)
+# Spec decode and CUDA-graph capture share this set. M dispatch for packed
+# pairs lives inside the opaque custom op; apply() must not branch on M.
+GRAPH_CAPTURE_SIZES = (1, 2, 3, 4, 5, 6, 8)
+TARGET_DECODE_TOK_S = 30.0
+PEAK_DRAM_GBPS_3090 = 936.0

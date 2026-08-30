@@ -4,7 +4,12 @@ from types import SimpleNamespace
 
 import torch
 
-from vllm_exl3_sm86.grouped import matching_pair_shards, mgemm_disabled
+from vllm_exl3_sm86.grouped import (
+    matching_kv_shards,
+    matching_pair_shards,
+    matching_qkv_shards,
+    mgemm_disabled,
+)
 from vllm_exl3_sm86.ops import register_custom_op
 
 
@@ -52,11 +57,57 @@ def test_gate_up_matching_k4_is_eligible():
     assert matching_pair_shards(_pair_layer()) == [0, 1]
 
 
-def test_qkv_three_shards_not_eligible():
+def test_qkv_three_shards_not_eligible_as_pair():
     layer = _pair_layer(shard_ids=["q", "k", "v"], n0=3072, n1=256)
     layer.exl3_output_partition_sizes = [3072, 256, 256]
     layer.trellis.exl3_tensors["v"] = torch.zeros((16, 16, 64), dtype=torch.int16)
     assert matching_pair_shards(layer) is None
+
+
+def test_qkv_kv_same_bitrate_is_eligible():
+    k = 256
+    layer = _pair_layer(shard_ids=["q", "k", "v"], n0=3072, n1=256, bits0=5, bits1=5)
+    layer.exl3_output_partition_sizes = [3072, 256, 256]
+    layer.trellis.exl3_tensors["q"] = torch.zeros(
+        (k // 16, 3072 // 16, 16 * 4), dtype=torch.int16
+    )
+    layer.trellis.exl3_tensors["k"] = torch.zeros(
+        (k // 16, 256 // 16, 16 * 5), dtype=torch.int16
+    )
+    layer.trellis.exl3_tensors["v"] = torch.zeros(
+        (k // 16, 256 // 16, 16 * 5), dtype=torch.int16
+    )
+    assert matching_pair_shards(layer) is None
+    assert matching_kv_shards(layer) == ["k", "v"]
+    assert matching_qkv_shards(layer) is None
+
+
+def test_qkv_mixed_kv_bitrate_not_fused():
+    k = 256
+    layer = _pair_layer(shard_ids=["q", "k", "v"], n0=3072, n1=256)
+    layer.exl3_output_partition_sizes = [3072, 256, 256]
+    layer.trellis.exl3_tensors["q"] = torch.zeros(
+        (k // 16, 3072 // 16, 16 * 4), dtype=torch.int16
+    )
+    layer.trellis.exl3_tensors["k"] = torch.zeros(
+        (k // 16, 256 // 16, 16 * 5), dtype=torch.int16
+    )
+    layer.trellis.exl3_tensors["v"] = torch.zeros(
+        (k // 16, 256 // 16, 16 * 6), dtype=torch.int16
+    )
+    assert matching_kv_shards(layer) is None
+
+
+def test_qkv_same_bitrate_all_three():
+    k = 256
+    layer = _pair_layer(shard_ids=["q", "k", "v"], n0=3072, n1=256, bits0=5, bits1=5)
+    layer.exl3_output_partition_sizes = [3072, 256, 256]
+    for shard, n in (("q", 3072), ("k", 256), ("v", 256)):
+        layer.trellis.exl3_tensors[shard] = torch.zeros(
+            (k // 16, n // 16, 16 * 5), dtype=torch.int16
+        )
+    assert matching_qkv_shards(layer) == ["q", "k", "v"]
+    assert matching_kv_shards(layer) == ["k", "v"]
 
 
 def test_mismatched_bitrate_not_eligible():
@@ -96,3 +147,4 @@ def test_apply_does_not_specialize_token_count():
     assert "shape[0] in" not in src
     packed_src = inspect.getsource(Exl3LinearMethod._apply_packed_pair)
     assert "shape[0]" not in packed_src
+    assert "GRAPH_CAPTURE_SIZES" not in inspect.getsource(Exl3LinearMethod.apply)

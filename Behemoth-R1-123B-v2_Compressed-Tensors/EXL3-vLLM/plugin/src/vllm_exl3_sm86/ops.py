@@ -201,6 +201,19 @@ def exl3_mgemm_impl(
         )
 
 
+def _packed_ws_for_m(
+    m: int,
+    outs: list[torch.Tensor],
+    xhads: list[torch.Tensor],
+    packeds: list[torch.Tensor],
+    xpads: list[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    for out, xhad, packed, xpad in zip(outs, xhads, packeds, xpads):
+        if int(out.shape[1]) == m:
+            return out, xhad, packed, xpad
+    return None
+
+
 def exl3_packed_pair_impl(
     x: torch.Tensor,
     trellis0: torch.Tensor,
@@ -217,20 +230,12 @@ def exl3_packed_pair_impl(
     ptrs_trellis: torch.Tensor,
     ptrs_suh: torch.Tensor,
     ptrs_svh: torch.Tensor,
-    out1: torch.Tensor,
-    xhad1: torch.Tensor,
-    packed1: torch.Tensor,
-    xpad1: torch.Tensor,
-    out2: torch.Tensor,
-    xhad2: torch.Tensor,
-    packed2: torch.Tensor,
-    xpad2: torch.Tensor,
-    out4: torch.Tensor,
-    xhad4: torch.Tensor,
-    packed4: torch.Tensor,
-    xpad4: torch.Tensor,
+    outs: list[torch.Tensor],
+    xhads: list[torch.Tensor],
+    packeds: list[torch.Tensor],
+    xpads: list[torch.Tensor],
 ) -> torch.Tensor:
-    """Fuse gate/up at decode sizes; two GEMMs otherwise.
+    """Fuse a packed pair at capture sizes; two GEMMs otherwise.
 
     Token-count dispatch stays inside this opaque impl so torch.compile cannot
     specialize the model to the profile-run length (8192).
@@ -241,15 +246,7 @@ def exl3_packed_pair_impl(
         raise ValueError(
             f"EXL3 input width {x.shape[-1]} exceeds packed K={packed_k}"
         )
-    decode_ws: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None
-    if m == 1:
-        decode_ws = (out1, xhad1, packed1, xpad1)
-    elif m == 2:
-        decode_ws = (out2, xhad2, packed2, xpad2)
-    elif m == 4:
-        decode_ws = (out4, xhad4, packed4, xpad4)
-    else:
-        decode_ws = None
+    decode_ws = _packed_ws_for_m(m, outs, xhads, packeds, xpads)
     if decode_ws is not None:
         out, xhad, packed, xpad = decode_ws
         xin = x
@@ -294,18 +291,10 @@ def exl3_packed_pair_fake(
     ptrs_trellis: torch.Tensor,
     ptrs_suh: torch.Tensor,
     ptrs_svh: torch.Tensor,
-    out1: torch.Tensor,
-    xhad1: torch.Tensor,
-    packed1: torch.Tensor,
-    xpad1: torch.Tensor,
-    out2: torch.Tensor,
-    xhad2: torch.Tensor,
-    packed2: torch.Tensor,
-    xpad2: torch.Tensor,
-    out4: torch.Tensor,
-    xhad4: torch.Tensor,
-    packed4: torch.Tensor,
-    xpad4: torch.Tensor,
+    outs: list[torch.Tensor],
+    xhads: list[torch.Tensor],
+    packeds: list[torch.Tensor],
+    xpads: list[torch.Tensor],
 ) -> torch.Tensor:
     del (
         trellis0,
@@ -320,18 +309,10 @@ def exl3_packed_pair_fake(
         ptrs_trellis,
         ptrs_suh,
         ptrs_svh,
-        out1,
-        xhad1,
-        packed1,
-        xpad1,
-        out2,
-        xhad2,
-        packed2,
-        xpad2,
-        out4,
-        xhad4,
-        packed4,
-        xpad4,
+        outs,
+        xhads,
+        packeds,
+        xpads,
     )
     return torch.empty(
         (x.shape[0], int(n0) + int(n1)),
@@ -469,20 +450,7 @@ def register_custom_op() -> None:
 
         @torch.library.custom_op(
             "vllm::exl3_packed_pair",
-            mutates_args=(
-                "out1",
-                "xhad1",
-                "packed1",
-                "xpad1",
-                "out2",
-                "xhad2",
-                "packed2",
-                "xpad2",
-                "out4",
-                "xhad4",
-                "packed4",
-                "xpad4",
-            ),
+            mutates_args=("outs", "xhads", "packeds", "xpads"),
             device_types="cuda",
         )
         def _exl3_packed_pair(
@@ -501,18 +469,10 @@ def register_custom_op() -> None:
             ptrs_trellis: torch.Tensor,
             ptrs_suh: torch.Tensor,
             ptrs_svh: torch.Tensor,
-            out1: torch.Tensor,
-            xhad1: torch.Tensor,
-            packed1: torch.Tensor,
-            xpad1: torch.Tensor,
-            out2: torch.Tensor,
-            xhad2: torch.Tensor,
-            packed2: torch.Tensor,
-            xpad2: torch.Tensor,
-            out4: torch.Tensor,
-            xhad4: torch.Tensor,
-            packed4: torch.Tensor,
-            xpad4: torch.Tensor,
+            outs: list[torch.Tensor],
+            xhads: list[torch.Tensor],
+            packeds: list[torch.Tensor],
+            xpads: list[torch.Tensor],
         ) -> torch.Tensor:
             return exl3_packed_pair_impl(
                 x,
@@ -530,18 +490,10 @@ def register_custom_op() -> None:
                 ptrs_trellis,
                 ptrs_suh,
                 ptrs_svh,
-                out1,
-                xhad1,
-                packed1,
-                xpad1,
-                out2,
-                xhad2,
-                packed2,
-                xpad2,
-                out4,
-                xhad4,
-                packed4,
-                xpad4,
+                outs,
+                xhads,
+                packeds,
+                xpads,
             )
 
         @_exl3_packed_pair.register_fake
@@ -561,18 +513,10 @@ def register_custom_op() -> None:
             ptrs_trellis: torch.Tensor,
             ptrs_suh: torch.Tensor,
             ptrs_svh: torch.Tensor,
-            out1: torch.Tensor,
-            xhad1: torch.Tensor,
-            packed1: torch.Tensor,
-            xpad1: torch.Tensor,
-            out2: torch.Tensor,
-            xhad2: torch.Tensor,
-            packed2: torch.Tensor,
-            xpad2: torch.Tensor,
-            out4: torch.Tensor,
-            xhad4: torch.Tensor,
-            packed4: torch.Tensor,
-            xpad4: torch.Tensor,
+            outs: list[torch.Tensor],
+            xhads: list[torch.Tensor],
+            packeds: list[torch.Tensor],
+            xpads: list[torch.Tensor],
         ) -> torch.Tensor:
             return exl3_packed_pair_fake(
                 x,
@@ -590,21 +534,14 @@ def register_custom_op() -> None:
                 ptrs_trellis,
                 ptrs_suh,
                 ptrs_svh,
-                out1,
-                xhad1,
-                packed1,
-                xpad1,
-                out2,
-                xhad2,
-                packed2,
-                xpad2,
-                out4,
-                xhad4,
-                packed4,
-                xpad4,
+                outs,
+                xhads,
+                packeds,
+                xpads,
             )
 
     _OP_REGISTERED = True
+
 
 
 def call_exl3_gemm(
@@ -689,18 +626,10 @@ def call_exl3_packed_pair(
     ptrs_trellis: torch.Tensor,
     ptrs_suh: torch.Tensor,
     ptrs_svh: torch.Tensor,
-    out1: torch.Tensor,
-    xhad1: torch.Tensor,
-    packed1: torch.Tensor,
-    xpad1: torch.Tensor,
-    out2: torch.Tensor,
-    xhad2: torch.Tensor,
-    packed2: torch.Tensor,
-    xpad2: torch.Tensor,
-    out4: torch.Tensor,
-    xhad4: torch.Tensor,
-    packed4: torch.Tensor,
-    xpad4: torch.Tensor,
+    outs: list[torch.Tensor],
+    xhads: list[torch.Tensor],
+    packeds: list[torch.Tensor],
+    xpads: list[torch.Tensor],
 ) -> torch.Tensor:
     register_custom_op()
     args = (
@@ -719,18 +648,10 @@ def call_exl3_packed_pair(
         ptrs_trellis,
         ptrs_suh,
         ptrs_svh,
-        out1,
-        xhad1,
-        packed1,
-        xpad1,
-        out2,
-        xhad2,
-        packed2,
-        xpad2,
-        out4,
-        xhad4,
-        packed4,
-        xpad4,
+        outs,
+        xhads,
+        packeds,
+        xpads,
     )
     if hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm, "exl3_packed_pair"):
         return torch.ops.vllm.exl3_packed_pair(*args)

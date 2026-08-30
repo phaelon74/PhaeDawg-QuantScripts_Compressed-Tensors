@@ -1,20 +1,37 @@
 #!/usr/bin/env bash
 # Build exllamav3_ext against the vLLM Torch/CUDA/Python ABI with native SM86 SASS.
-# Run from ~/kld-nightly-vllm. Conversion still uses a separate full ExLlamaV3 env.
+# Prefers the in-tree submodule (phaelon74/exllamav3 sm86-decode), then EXLLAMAV3_SRC,
+# then clones upstream at the pin and applies kernel/overlay.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PIN="${EXLLAMAV3_COMMIT:-$(python3 -c 'import json,pathlib; print(json.loads(pathlib.Path(r"'"$ROOT"'/manifests/stack.json").read_text())["exllamav3"]["pinned_commit"])')}"
-SRC="${EXLLAMAV3_SRC:-$HOME/src/exllamav3}"
+SUBMODULE="$ROOT/exllamav3"
+SRC="${EXLLAMAV3_SRC:-}"
+if [[ -z "$SRC" ]]; then
+  if [[ -d "$SUBMODULE/.git" || -f "$SUBMODULE/.git" ]]; then
+    SRC="$SUBMODULE"
+  else
+    SRC="${HOME}/src/exllamav3"
+  fi
+fi
 OUT="${EXLLAMAV3_EXT_OUT:-$ROOT/build/exllamav3_ext}"
 export EXLLAMAV3_EXT_OUT="$OUT"
+APPLY_OVERLAY="${EXL3_APPLY_OVERLAY:-1}"
 
-if [[ ! -d "$SRC/.git" ]]; then
+if [[ ! -d "$SRC/.git" && ! -f "$SRC/.git" ]]; then
   mkdir -p "$(dirname "$SRC")"
   git clone https://github.com/turboderp-org/exllamav3.git "$SRC"
 fi
-git -C "$SRC" fetch --all --tags
-git -C "$SRC" checkout "$PIN"
+
+if [[ "$SRC" != "$SUBMODULE" ]]; then
+  git -C "$SRC" fetch --all --tags
+  git -C "$SRC" checkout "$PIN"
+fi
+
+if [[ "$APPLY_OVERLAY" == "1" ]]; then
+  python3 "$ROOT/kernel/overlay/apply_overlay.py" "$SRC"
+fi
 
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6}"
 export MAX_JOBS="${MAX_JOBS:-$(nproc)}"
@@ -26,7 +43,6 @@ print("torch", torch.__version__, "cuda", torch.version.cuda, "abi", torch._C._G
 print("python", sys.version)
 PY
 
-# Extension-only install into the current venv, no build isolation, Ninja, native SASS.
 pip install --no-build-isolation --no-deps -e "$SRC"
 
 mkdir -p "$OUT"
@@ -59,5 +75,7 @@ print("torch_lib", torch_lib)
 PY
 
 echo "Set VLLM_EXL3_EXT_PATH=$OUT before launching vLLM."
+echo "Source tree: $SRC"
 echo "Pinned commit: $PIN"
+echo "Overlay: $APPLY_OVERLAY"
 echo "TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST"

@@ -152,6 +152,10 @@ class Exl3LinearMethod(LinearMethodBase):
             # Dynamo would specialize the compile range to the profile-run M.
             if getattr(layer, "exl3_use_mgemm", False):
                 output = self._apply_packed_pair(layer, x_2d)
+            elif getattr(layer, "exl3_use_kv_mgemm", False):
+                q_out = self._apply_one(layer, x_2d, "q")
+                kv_out = self._apply_packed_pair(layer, x_2d)
+                output = torch.cat((q_out, kv_out), dim=-1)
             else:
                 outputs = [
                     self._apply_one(layer, x_2d, shard_id)
@@ -317,6 +321,7 @@ class Exl3LinearMethod(LinearMethodBase):
     @staticmethod
     def _apply_packed_pair(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
         s0, s1 = layer.exl3_mgemm_shards
+        capture = sorted(layer.exl3_mgemm_out_ws)
         return call_exl3_packed_pair(
             x,
             layer.trellis.exl3_tensors[s0],
@@ -333,18 +338,10 @@ class Exl3LinearMethod(LinearMethodBase):
             layer.exl3_mgemm_ptrs_trellis,
             layer.exl3_mgemm_ptrs_suh,
             layer.exl3_mgemm_ptrs_svh,
-            layer.exl3_mgemm_out_ws[1],
-            layer.exl3_mgemm_xhad_ws[1],
-            layer.exl3_mgemm_packed_ws[1],
-            layer.exl3_mgemm_x_ws[1],
-            layer.exl3_mgemm_out_ws[2],
-            layer.exl3_mgemm_xhad_ws[2],
-            layer.exl3_mgemm_packed_ws[2],
-            layer.exl3_mgemm_x_ws[2],
-            layer.exl3_mgemm_out_ws[4],
-            layer.exl3_mgemm_xhad_ws[4],
-            layer.exl3_mgemm_packed_ws[4],
-            layer.exl3_mgemm_x_ws[4],
+            [layer.exl3_mgemm_out_ws[m] for m in capture],
+            [layer.exl3_mgemm_xhad_ws[m] for m in capture],
+            [layer.exl3_mgemm_packed_ws[m] for m in capture],
+            [layer.exl3_mgemm_x_ws[m] for m in capture],
         )
 
     @staticmethod

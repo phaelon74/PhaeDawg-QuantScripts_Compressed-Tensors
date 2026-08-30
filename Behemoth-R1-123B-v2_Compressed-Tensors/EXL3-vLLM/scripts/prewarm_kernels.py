@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prewarm EXL3 kernels for CUDA-graph capture sizes 1/2/4."""
+"""Prewarm EXL3 kernels for CUDA-graph capture sizes 1/2/3/4/5/6/8."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugin" / "src"))
 
+from vllm_exl3_sm86.constants import CODEBOOK_FLAGS  # noqa: E402
 from vllm_exl3_sm86.graph import prewarm_behemoth_tp4  # noqa: E402
 
 
@@ -20,9 +21,9 @@ def main() -> int:
     parser.add_argument("--output", default=str(ROOT / "results" / "prewarm.json"))
     parser.add_argument(
         "--codebook",
-        choices=("3inst", "mul1", "both"),
-        default="both",
-        help="3inst is ArtusDev 4.25. mul1 is the 4.5 INT8 diagnostic. both is default.",
+        choices=("3inst", "mcg", "mul1", "all"),
+        default="all",
+        help="3inst is ArtusDev 4.25. mcg and mul1 are the other EXL3 codebooks.",
     )
     args = parser.parse_args()
     import torch
@@ -32,8 +33,9 @@ def main() -> int:
         return 2
     codebooks = {
         "3inst": ((False, False),),
+        "mcg": ((True, False),),
         "mul1": ((False, True),),
-        "both": ((False, False), (False, True)),
+        "all": CODEBOOK_FLAGS,
     }[args.codebook]
     receipts = prewarm_behemoth_tp4(
         torch.device("cuda", args.device),

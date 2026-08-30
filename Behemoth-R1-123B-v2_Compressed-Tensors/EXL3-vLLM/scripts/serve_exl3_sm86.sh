@@ -65,7 +65,7 @@ if [[ "$ENFORCE_EAGER" == "1" ]]; then
   VLLM_ARGS+=(--enforce-eager)
 else
   CUDAGRAPH_MODE="${CUDAGRAPH_MODE:-full_decode_only}"
-  CUDAGRAPH_CAPTURE_SIZES="${CUDAGRAPH_CAPTURE_SIZES:-[1,2,4]}"
+  CUDAGRAPH_CAPTURE_SIZES="${CUDAGRAPH_CAPTURE_SIZES:-[1,2,3,4,5,6,8]}"
   COMPILATION_CONFIG="${COMPILATION_CONFIG:-{\"mode\":3,\"cudagraph_mode\":\"${CUDAGRAPH_MODE}\",\"cudagraph_capture_sizes\":${CUDAGRAPH_CAPTURE_SIZES}}}"
   export VLLM_EXL3_ALLOW_GRAPHS=1
   VLLM_ARGS+=(--compilation-config "$COMPILATION_CONFIG")

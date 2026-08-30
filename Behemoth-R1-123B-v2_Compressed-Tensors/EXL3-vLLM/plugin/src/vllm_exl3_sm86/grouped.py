@@ -1,7 +1,9 @@
 """Graph-safe grouped GEMM (exl3_mgemm) for matching packed pairs.
 
 ArtusDev 4.25 gate/up are all K=4, same TP4 width, implicit 3inst. K/V are
-mixed K=5/K=6 per layer, so they stay two GEMMs unless a later layer matches.
+mixed K=5/K=6 per layer: fuse k+v when that layer's pair shares bitrate and
+width. Q stays a separate GEMM. Full QKV (unequal N) needs size_n_list on
+the native mgemm and is enabled only when every shard shares K.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from .slicing import ShardId, output_shard_size
 
 _WARMED_KEYS: set[tuple[Any, ...]] = set()
 _ENABLED_LAYERS = 0
+_ENABLED_KV_LAYERS = 0
 _WARMUP_FAILED = False
 
 
@@ -29,11 +32,55 @@ def mgemm_disabled() -> bool:
 
 
 def matching_pair_shards(layer: torch.nn.Module) -> list[ShardId] | None:
-    """Return two shard ids that can share one mgemm, else None."""
+    """Return two shard ids that can share one equal-N mgemm, else None."""
     shard_ids = list(getattr(layer, "exl3_shard_ids", ()))
-    if len(shard_ids) != 2:
+    if len(shard_ids) == 2:
+        return _matching_equal_pair(layer, shard_ids[0], shard_ids[1])
+    return None
+
+
+def matching_kv_shards(layer: torch.nn.Module) -> list[ShardId] | None:
+    """Return [k, v] when a QKV layer can fuse the launch-bound pair."""
+    shard_ids = list(getattr(layer, "exl3_shard_ids", ()))
+    if shard_ids != ["q", "k", "v"]:
         return None
-    left, right = shard_ids
+    return _matching_equal_pair(layer, "k", "v")
+
+
+def matching_qkv_shards(layer: torch.nn.Module) -> list[ShardId] | None:
+    """Return [q, k, v] when all three share bitrate and codebook (unequal N)."""
+    shard_ids = list(getattr(layer, "exl3_shard_ids", ()))
+    if shard_ids != ["q", "k", "v"]:
+        return None
+    if not _same_codebook_and_k(layer, "q", "k"):
+        return None
+    if not _same_codebook_and_k(layer, "k", "v"):
+        return None
+    return ["q", "k", "v"]
+
+
+def _same_codebook_and_k(layer: torch.nn.Module, left: ShardId, right: ShardId) -> bool:
+    trellis = layer.trellis.exl3_tensors
+    if left not in trellis or right not in trellis:
+        return False
+    if int(trellis[left].shape[0]) != int(trellis[right].shape[0]):
+        return False
+    if int(trellis[left].shape[2]) != int(trellis[right].shape[2]):
+        return False
+    mcg_left = left in layer.mcg.exl3_tensors
+    mcg_right = right in layer.mcg.exl3_tensors
+    mul1_left = left in layer.mul1.exl3_tensors
+    mul1_right = right in layer.mul1.exl3_tensors
+    if mcg_left != mcg_right or mul1_left != mul1_right:
+        return False
+    if mcg_left and mul1_left:
+        return False
+    return True
+
+
+def _matching_equal_pair(
+    layer: torch.nn.Module, left: ShardId, right: ShardId
+) -> list[ShardId] | None:
     if output_shard_size(layer, left) != output_shard_size(layer, right):
         return None
     trellis = layer.trellis.exl3_tensors
@@ -41,13 +88,7 @@ def matching_pair_shards(layer: torch.nn.Module) -> list[ShardId] | None:
         return None
     if tuple(trellis[left].shape) != tuple(trellis[right].shape):
         return None
-    mcg_left = left in layer.mcg.exl3_tensors
-    mcg_right = right in layer.mcg.exl3_tensors
-    mul1_left = left in layer.mul1.exl3_tensors
-    mul1_right = right in layer.mul1.exl3_tensors
-    if mcg_left != mcg_right or mul1_left != mul1_right:
-        return None
-    if mcg_left and mul1_left:
+    if not _same_codebook_and_k(layer, left, right):
         return None
     return [left, right]
 
@@ -62,18 +103,53 @@ def _ptr_table(tensors: list[torch.Tensor], device: torch.device) -> torch.Tenso
 
 def enable_mgemm_if_eligible(layer: torch.nn.Module) -> bool:
     """Build pointer tables and per-M workspaces. Returns True if decode will fuse."""
-    global _ENABLED_LAYERS, _WARMUP_FAILED
+    global _ENABLED_LAYERS, _ENABLED_KV_LAYERS, _WARMUP_FAILED
     layer.exl3_use_mgemm = False
+    layer.exl3_use_kv_mgemm = False
     if _WARMUP_FAILED or mgemm_disabled():
-        return False
-    pair = matching_pair_shards(layer)
-    if pair is None:
         return False
     from .ops import ext_has_mgemm
 
     if not ext_has_mgemm():
         return False
 
+    pair = matching_pair_shards(layer)
+    kv_pair = None if pair is not None else matching_kv_shards(layer)
+    if pair is None and kv_pair is None:
+        return False
+    fused = pair if pair is not None else kv_pair
+    assert fused is not None
+    _install_pair_workspaces(layer, fused)
+    _warmup_mgemm(layer)
+    if not layer.exl3_use_mgemm and not getattr(layer, "exl3_use_kv_mgemm", False):
+        return False
+    if kv_pair is not None:
+        layer.exl3_use_mgemm = False
+        layer.exl3_use_kv_mgemm = True
+        _ENABLED_KV_LAYERS += 1
+        if _ENABLED_KV_LAYERS == 1:
+            print(
+                "vllm_exl3_sm86: fused exl3_mgemm decode enabled for K/V pairs "
+                f"(bitrate={layer.exl3_mgemm_bitrate}, N={layer.exl3_mgemm_n}, "
+                f"mcg={int(layer.exl3_mgemm_mcg)}, "
+                f"mul1={int(layer.exl3_mgemm_mul1)})",
+                flush=True,
+            )
+        return True
+    layer.exl3_use_mgemm = True
+    _ENABLED_LAYERS += 1
+    if _ENABLED_LAYERS == 1:
+        print(
+            "vllm_exl3_sm86: fused exl3_mgemm decode enabled for packed "
+            f"pairs (bitrate={layer.exl3_mgemm_bitrate}, N={layer.exl3_mgemm_n}, "
+            f"mcg={int(layer.exl3_mgemm_mcg)}, "
+            f"mul1={int(layer.exl3_mgemm_mul1)})",
+            flush=True,
+        )
+    return True
+
+
+def _install_pair_workspaces(layer: torch.nn.Module, pair: list[ShardId]) -> None:
     left, right = pair
     trellis = layer.trellis.exl3_tensors[left]
     k = int(trellis.shape[0] * TRELLIS_TILE)
@@ -115,18 +191,6 @@ def enable_mgemm_if_eligible(layer: torch.nn.Module) -> bool:
             (m, k), dtype=torch.float16, device=device
         )
     layer.exl3_use_mgemm = True
-    _warmup_mgemm(layer)
-    if not layer.exl3_use_mgemm:
-        return False
-    _ENABLED_LAYERS += 1
-    if _ENABLED_LAYERS == 1:
-        print(
-            "vllm_exl3_sm86: fused exl3_mgemm decode enabled for packed "
-            f"pairs (bitrate={bitrate}, N={n}, mcg={int(layer.exl3_mgemm_mcg)}, "
-            f"mul1={int(layer.exl3_mgemm_mul1)})",
-            flush=True,
-        )
-    return True
 
 
 def _warmup_mgemm(layer: torch.nn.Module) -> None:
@@ -167,6 +231,7 @@ def _warmup_mgemm(layer: torch.nn.Module) -> None:
         global _WARMUP_FAILED
         _WARMUP_FAILED = True
         layer.exl3_use_mgemm = False
+        layer.exl3_use_kv_mgemm = False
         print(
             f"vllm_exl3_sm86: mgemm warmup failed, falling back to two GEMMs: {exc}",
             flush=True,

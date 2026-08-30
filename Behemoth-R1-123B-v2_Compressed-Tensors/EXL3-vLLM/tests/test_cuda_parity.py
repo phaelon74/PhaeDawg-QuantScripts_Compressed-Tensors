@@ -70,8 +70,9 @@ def _reconstruct_ref(ext, x, trellis, suh, svh, bitrate: int):
     return ref
 
 
-@pytest.mark.parametrize("bitrate", [3, 4, 5])
-def test_plugin_compressed_matches_ext_gemm_3inst(bitrate, monkeypatch):
+@pytest.mark.parametrize("bitrate", [1, 2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("mcg,mul1", [(False, False), (True, False), (False, True)])
+def test_plugin_compressed_matches_ext_gemm_all_codebooks(bitrate, mcg, mul1, monkeypatch):
     monkeypatch.setenv("VLLM_EXL3_FORCE_COMPRESSED", "1")
     monkeypatch.delenv("VLLM_EXL3_FORCE_RECONSTRUCT", raising=False)
     ext = _ext()
@@ -79,12 +80,14 @@ def test_plugin_compressed_matches_ext_gemm_3inst(bitrate, monkeypatch):
 
     device = torch.device("cuda")
     x, trellis, suh, svh = _payloads(bitrate, 1, torch.float16, device)
-    got = call_exl3_gemm(x, trellis, suh, svh, mcg=False, mul1=False)
-    ref = _native_compressed(ext, x, trellis, suh, svh, False, False)
+    got = call_exl3_gemm(x, trellis, suh, svh, mcg=mcg, mul1=mul1)
+    ref = _native_compressed(ext, x, trellis, suh, svh, mcg, mul1)
     torch.cuda.synchronize()
     if not torch.equal(got, ref):
-        max_err = (got - ref).abs().max().item()
-        pytest.fail(f"3inst plugin vs ext bitrate={bitrate} M=1 max_err={max_err}")
+        max_err = (got.float() - ref.float()).abs().max().item()
+        pytest.fail(
+            f"plugin vs ext bitrate={bitrate} mcg={mcg} mul1={mul1} M=1 max_err={max_err}"
+        )
 
 
 @pytest.mark.parametrize("bitrate", [3, 4, 6])
