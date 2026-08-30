@@ -55,8 +55,9 @@ BEHEMOTH_TP4_SHAPES = {
     "lm_head": (12288, 8192),
 }
 
-# ArtusDev 4.25-bpw uses mixed K=3/4/5. Local 4.5 mul1 is K=3/4 only.
-DECODER_BITRATES = (3, 4, 5)
+# ArtusDev 4.25-bpw decoder is mixed K=4/5/6 (no K=3). Local 4.5 mul1 is K=3/4.
+# lm_head is independently H6; k_proj/v_proj also use K=6 on 4.25.
+DECODER_BITRATES = (3, 4, 5, 6)
 HEAD_BITRATE = 6
 # (mcg, mul1). Implicit 3inst is (False, False); MUL1 INT8 is (False, True).
 CODEBOOK_FLAGS = ((False, False), (False, True))

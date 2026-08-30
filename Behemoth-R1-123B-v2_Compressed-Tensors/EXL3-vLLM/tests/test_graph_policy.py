@@ -11,7 +11,7 @@ def test_capture_sizes_are_1_2_4():
 
 
 def test_decoder_bitrates_include_k5():
-    assert DECODER_BITRATES == (3, 4, 5)
+    assert DECODER_BITRATES == (3, 4, 5, 6)
 
 
 def test_graphs_remain_fail_closed(monkeypatch):

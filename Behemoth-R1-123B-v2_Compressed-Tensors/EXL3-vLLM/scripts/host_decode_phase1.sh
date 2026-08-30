@@ -53,7 +53,8 @@ echo "=== 6. mixed-K token budget ==="
 python "$EXL3/scripts/decode_latency_budget.py" \
   --microbench "$EXL3/results/kernel_microbench_3inst_decode.json" \
   --inventory "$EXL3/results/artusdev_4p25_inventory.json" \
-  --output "$EXL3/results/decode_latency_budget.json"
+  --output "$EXL3/results/decode_latency_budget.json" \
+  || echo "budget exited $?; continuing"
 
 echo "=== 7. prewarm 3inst + K3/K4/K5 ==="
 python "$EXL3/scripts/prewarm_kernels.py" --device 0 --codebook 3inst --output "$EXL3/results/prewarm_3inst.json"

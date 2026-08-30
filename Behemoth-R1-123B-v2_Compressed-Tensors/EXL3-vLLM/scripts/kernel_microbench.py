@@ -176,8 +176,6 @@ def main() -> int:
         for bitrate in bitrates:
             if name == "lm_head" and bitrate != 6:
                 continue
-            if name != "lm_head" and bitrate == 6:
-                continue
             for m in ms:
                 x, trellis, suh, svh = _payloads(k, n, bitrate, m, device)
                 output_ws = torch.empty(

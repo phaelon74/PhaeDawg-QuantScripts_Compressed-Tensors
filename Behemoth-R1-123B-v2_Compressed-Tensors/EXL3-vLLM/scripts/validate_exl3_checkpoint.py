@@ -62,13 +62,13 @@ def _profile_errors(
             errors.append(f"size {gib:.2f} GiB is outside 40-70 GiB; verify")
         return errors
     if profile == "artusdev-4p25":
-        if set(bitrates) - {3, 4, 5}:
+        if set(bitrates) - {4, 5, 6}:
             errors.append(
-                f"ArtusDev 4.25 decoder bitrates should be K3/K4/K5, got {dict(bitrates)}"
+                f"ArtusDev 4.25 decoder bitrates should be K4/K5/K6, got {dict(bitrates)}"
             )
-        if {3, 4, 5} - set(bitrates):
+        if {4, 5, 6} - set(bitrates):
             errors.append(
-                f"ArtusDev 4.25 must include K3, K4, and K5, got {dict(bitrates)}"
+                f"ArtusDev 4.25 must include K4, K5, and K6, got {dict(bitrates)}"
             )
         if codebooks.get("none", 0) != count:
             errors.append(

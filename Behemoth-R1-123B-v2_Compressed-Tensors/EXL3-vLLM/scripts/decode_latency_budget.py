@@ -26,7 +26,12 @@ DECODER_LEAVES = (
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--microbench", required=True)
+    parser.add_argument(
+        "--microbench",
+        nargs="+",
+        required=True,
+        help="One or more kernel_microbench JSON files; rows are merged.",
+    )
     parser.add_argument("--inventory", required=True)
     parser.add_argument(
         "--output",
@@ -34,9 +39,13 @@ def main() -> int:
     )
     parser.add_argument("--target-tok-s", type=float, default=28.0)
     args = parser.parse_args()
-    bench = json.loads(Path(args.microbench).read_text(encoding="utf-8"))
+    rows = []
+    codebook = None
+    for path in args.microbench:
+        bench = json.loads(Path(path).read_text(encoding="utf-8"))
+        codebook = codebook or bench.get("codebook")
+        rows.extend(r for r in bench.get("rows", []) if r.get("m") == 1)
     inventory = json.loads(Path(args.inventory).read_text(encoding="utf-8"))
-    rows = [r for r in bench.get("rows", []) if r.get("m") == 1]
     by_key = {(r["name"], int(r["bitrate"])): r for r in rows}
     leaf_counts = inventory.get("decoder_leaf_bitrates") or {}
     plugin_ms = 0.0
@@ -74,7 +83,8 @@ def main() -> int:
     target_ms = 1000.0 / args.target_tok_s
     report = {
         "checkpoint": inventory.get("checkpoint"),
-        "codebook": bench.get("codebook"),
+        "codebook": codebook,
+        "microbench_files": list(args.microbench),
         "decoder_linears": inventory.get("decoder_linears"),
         "behemoth_layers": BEHEMOTH_LAYERS,
         "plugin_ms_per_token": plugin_ms,
