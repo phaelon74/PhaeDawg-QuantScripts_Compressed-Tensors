@@ -86,19 +86,20 @@ def _compressed_gemm(
     svh: torch.Tensor,
     mcg: bool,
     mul1: bool,
+    out: torch.Tensor | None = None,
+    x_had: torch.Tensor | None = None,
 ) -> torch.Tensor:
     ext = _load_exl3_ext()
-    output = torch.empty(
-        (x.shape[0], trellis.shape[1] * TRELLIS_TILE),
-        dtype=torch.float16,
-        device=x.device,
-    )
-    x_had = torch.empty_like(x)
+    n = int(trellis.shape[1] * TRELLIS_TILE)
+    if out is None:
+        out = torch.empty((x.shape[0], n), dtype=torch.float16, device=x.device)
+    if x_had is None:
+        x_had = torch.empty_like(x)
     with nvtx_range("exl3.gemm"):
         ext.exl3_gemm(
             x,
             trellis,
-            output,
+            out,
             suh,
             x_had,
             svh,
@@ -107,7 +108,7 @@ def _compressed_gemm(
             mul1,
             0,
         )
-    return output
+    return out
 
 
 def exl3_gemm_impl(
@@ -117,6 +118,8 @@ def exl3_gemm_impl(
     svh: torch.Tensor,
     mcg: bool,
     mul1: bool,
+    out: torch.Tensor | None = None,
+    x_had: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """M-dependent dispatch lives inside the opaque op so torch.compile cannot
     specialize a prefill branch and reuse it for decode."""
@@ -127,10 +130,14 @@ def exl3_gemm_impl(
     if _should_reconstruct(m, k, n, bitrate):
         fused = m >= FUSED_RECONSTRUCT_M
         with nvtx_range("exl3.reconstruct"):
-            return reconstruct_hgemm(
+            y = reconstruct_hgemm(
                 x, trellis, suh, svh, mcg=mcg, mul1=mul1, fused=fused
             )
-    return _compressed_gemm(x, trellis, suh, svh, mcg, mul1)
+            if out is not None:
+                out.copy_(y)
+                return out
+            return y
+    return _compressed_gemm(x, trellis, suh, svh, mcg, mul1, out=out, x_had=x_had)
 
 
 def exl3_gemm_fake(
@@ -150,39 +157,77 @@ def exl3_gemm_fake(
 
 
 def register_custom_op() -> None:
-    """Register vllm::exl3_gemm once. Safe to call from plugin init and tests."""
+    """Register vllm::exl3_gemm and vllm::exl3_gemm_out once."""
     global _OP_REGISTERED
     if _OP_REGISTERED:
         return
-    if hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm, "exl3_gemm"):
+
+    has_vllm = hasattr(torch.ops, "vllm")
+    has_gemm = has_vllm and hasattr(torch.ops.vllm, "exl3_gemm")
+    has_out = has_vllm and hasattr(torch.ops.vllm, "exl3_gemm_out")
+    if has_gemm and has_out:
         _OP_REGISTERED = True
         return
 
-    @torch.library.custom_op(
-        "vllm::exl3_gemm",
-        mutates_args=(),
-        device_types="cuda",
-    )
-    def _exl3_gemm(
-        x: torch.Tensor,
-        trellis: torch.Tensor,
-        suh: torch.Tensor,
-        svh: torch.Tensor,
-        mcg: bool,
-        mul1: bool,
-    ) -> torch.Tensor:
-        return exl3_gemm_impl(x, trellis, suh, svh, mcg, mul1)
+    if not has_gemm:
 
-    @_exl3_gemm.register_fake
-    def _exl3_gemm_fake(
-        x: torch.Tensor,
-        trellis: torch.Tensor,
-        suh: torch.Tensor,
-        svh: torch.Tensor,
-        mcg: bool,
-        mul1: bool,
-    ) -> torch.Tensor:
-        return exl3_gemm_fake(x, trellis, suh, svh, mcg, mul1)
+        @torch.library.custom_op(
+            "vllm::exl3_gemm",
+            mutates_args=(),
+            device_types="cuda",
+        )
+        def _exl3_gemm(
+            x: torch.Tensor,
+            trellis: torch.Tensor,
+            suh: torch.Tensor,
+            svh: torch.Tensor,
+            mcg: bool,
+            mul1: bool,
+        ) -> torch.Tensor:
+            return exl3_gemm_impl(x, trellis, suh, svh, mcg, mul1)
+
+        @_exl3_gemm.register_fake
+        def _exl3_gemm_fake(
+            x: torch.Tensor,
+            trellis: torch.Tensor,
+            suh: torch.Tensor,
+            svh: torch.Tensor,
+            mcg: bool,
+            mul1: bool,
+        ) -> torch.Tensor:
+            return exl3_gemm_fake(x, trellis, suh, svh, mcg, mul1)
+
+    if not has_out:
+
+        @torch.library.custom_op(
+            "vllm::exl3_gemm_out",
+            mutates_args=("out", "x_had"),
+            device_types="cuda",
+        )
+        def _exl3_gemm_out(
+            x: torch.Tensor,
+            trellis: torch.Tensor,
+            suh: torch.Tensor,
+            svh: torch.Tensor,
+            mcg: bool,
+            mul1: bool,
+            out: torch.Tensor,
+            x_had: torch.Tensor,
+        ) -> None:
+            exl3_gemm_impl(x, trellis, suh, svh, mcg, mul1, out=out, x_had=x_had)
+
+        @_exl3_gemm_out.register_fake
+        def _exl3_gemm_out_fake(
+            x: torch.Tensor,
+            trellis: torch.Tensor,
+            suh: torch.Tensor,
+            svh: torch.Tensor,
+            mcg: bool,
+            mul1: bool,
+            out: torch.Tensor,
+            x_had: torch.Tensor,
+        ) -> None:
+            del x, trellis, suh, svh, mcg, mul1, out, x_had
 
     _OP_REGISTERED = True
 
@@ -194,8 +239,19 @@ def call_exl3_gemm(
     svh: torch.Tensor,
     mcg: bool,
     mul1: bool,
+    out: torch.Tensor | None = None,
+    x_had: torch.Tensor | None = None,
 ) -> torch.Tensor:
     register_custom_op()
+    if out is not None and x_had is not None:
+        if hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm, "exl3_gemm_out"):
+            torch.ops.vllm.exl3_gemm_out(
+                x, trellis, suh, svh, mcg, mul1, out, x_had
+            )
+            return out
+        return exl3_gemm_impl(
+            x, trellis, suh, svh, mcg, mul1, out=out, x_had=x_had
+        )
     if hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm, "exl3_gemm"):
         return torch.ops.vllm.exl3_gemm(x, trellis, suh, svh, mcg, mul1)
     return exl3_gemm_impl(x, trellis, suh, svh, mcg, mul1)

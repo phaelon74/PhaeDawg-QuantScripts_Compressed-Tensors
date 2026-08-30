@@ -74,9 +74,7 @@ def prewarm_behemoth_tp4(
         if name == "lm_head":
             shape_bitrates = (HEAD_BITRATE,)
         else:
-            # Decoder K=6 is used by ArtusDev 4.25 k_proj/v_proj. Do not
-            # drop HEAD_BITRATE from decoder prewarm.
-            requested = tuple(int(b) for b in bitrates)
+            requested = tuple(dict.fromkeys(int(b) for b in bitrates))
             shape_bitrates = requested or tuple(DECODER_BITRATES)
         for bitrate in shape_bitrates:
             for mcg, mul1 in codebooks:

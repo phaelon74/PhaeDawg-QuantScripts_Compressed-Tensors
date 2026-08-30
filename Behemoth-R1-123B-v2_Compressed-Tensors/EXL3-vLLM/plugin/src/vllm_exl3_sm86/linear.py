@@ -15,7 +15,13 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 
-from .constants import HADAMARD_BLOCK, MCG_SENTINEL, MUL1_SENTINEL, TRELLIS_TILE
+from .constants import (
+    GRAPH_CAPTURE_SIZES,
+    HADAMARD_BLOCK,
+    MCG_SENTINEL,
+    MUL1_SENTINEL,
+    TRELLIS_TILE,
+)
 from .nvtx import nvtx_range
 from .ops import call_exl3_gemm
 from .parameter import Exl3Parameter, exl3_weight_loader
@@ -128,6 +134,7 @@ class Exl3LinearMethod(LinearMethodBase):
                 param.exl3_tensors[shard_id] = tensor.to(
                     device=device, non_blocking=True
                 ).contiguous()
+        self._allocate_decode_workspaces(layer)
 
     def apply(
         self,
@@ -279,6 +286,27 @@ class Exl3LinearMethod(LinearMethodBase):
             "add it to the model's packed_modules_mapping."
         )
 
+    @classmethod
+    def _allocate_decode_workspaces(cls, layer: torch.nn.Module) -> None:
+        """Stable per-shard decode buffers so CUDA graphs never capture malloc."""
+        max_m = max(GRAPH_CAPTURE_SIZES)
+        layer.exl3_decode_max_m = max_m
+        layer.exl3_out_ws = {}
+        layer.exl3_xhad_ws = {}
+        for shard_id in layer.exl3_shard_ids:
+            trellis = layer.trellis.exl3_tensors[shard_id]
+            k = int(trellis.shape[0] * TRELLIS_TILE)
+            n = cls._output_shard_size(layer, shard_id)
+            packed_n = int(trellis.shape[1] * TRELLIS_TILE)
+            n = max(n, packed_n)
+            device = trellis.device
+            layer.exl3_out_ws[shard_id] = torch.empty(
+                (max_m, n), dtype=torch.float16, device=device
+            )
+            layer.exl3_xhad_ws[shard_id] = torch.empty(
+                (max_m, k), dtype=torch.float16, device=device
+            )
+
     @staticmethod
     def _apply_one(
         layer: torch.nn.Module, x: torch.Tensor, shard_id: ShardId
@@ -291,6 +319,15 @@ class Exl3LinearMethod(LinearMethodBase):
             )
         if x.shape[-1] < packed_k:
             x = torch.nn.functional.pad(x, (0, packed_k - x.shape[-1]))
+        out = None
+        x_had = None
+        max_m = int(getattr(layer, "exl3_decode_max_m", 0))
+        if 0 < x.shape[0] <= max_m:
+            out = layer.exl3_out_ws[shard_id][: x.shape[0]]
+            x_had = layer.exl3_xhad_ws[shard_id][: x.shape[0]]
+            if x_had.shape[-1] != x.shape[-1]:
+                x_had = None
+                out = None
         output = call_exl3_gemm(
             x,
             trellis,
@@ -298,6 +335,8 @@ class Exl3LinearMethod(LinearMethodBase):
             layer.svh.exl3_tensors[shard_id],
             shard_id in layer.mcg.exl3_tensors,
             shard_id in layer.mul1.exl3_tensors,
+            out=out,
+            x_had=x_had,
         )
         logical_n = Exl3LinearMethod._output_shard_size(layer, shard_id)
         if output.shape[-1] < logical_n:

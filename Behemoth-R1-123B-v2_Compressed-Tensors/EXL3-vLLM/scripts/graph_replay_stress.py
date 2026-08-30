@@ -57,14 +57,20 @@ def main() -> int:
             )
             suh = torch.ones(k, dtype=torch.float16, device=device)
             svh = torch.ones(n, dtype=torch.float16, device=device)
-            call_exl3_gemm(x, trellis, suh, svh, args.mcg, args.mul1)
+            out = torch.empty((m, n), dtype=torch.float16, device=device)
+            x_had = torch.empty((m, k), dtype=torch.float16, device=device)
+            call_exl3_gemm(
+                x, trellis, suh, svh, args.mcg, args.mul1, out=out, x_had=x_had
+            )
             torch.cuda.synchronize()
             g = torch.cuda.CUDAGraph()
             s = torch.cuda.Stream()
             s.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(s):
                 with torch.cuda.graph(g):
-                    call_exl3_gemm(x, trellis, suh, svh, args.mcg, args.mul1)
+                    call_exl3_gemm(
+                        x, trellis, suh, svh, args.mcg, args.mul1, out=out, x_had=x_had
+                    )
             torch.cuda.current_stream().wait_stream(s)
             graphs.append(g)
             print(f"captured {name} K={bitrate} M={m} mcg={int(args.mcg)} mul1={int(args.mul1)}")
