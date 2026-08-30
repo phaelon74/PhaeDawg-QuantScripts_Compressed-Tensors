@@ -47,6 +47,8 @@ def main() -> int:
     torch.cuda.set_device(device)
     names = list(BEHEMOTH_TP4_SHAPES) if args.all_shapes else [args.shape]
     graphs = []
+    # CUDA graphs record device pointers. Keep every captured tensor alive.
+    payloads: list[tuple[torch.Tensor, ...]] = []
     for name in names:
         k, n = BEHEMOTH_TP4_SHAPES[name]
         bitrate = 6 if name == "lm_head" else args.bitrate
@@ -72,7 +74,9 @@ def main() -> int:
                         x, trellis, suh, svh, args.mcg, args.mul1, out=out, x_had=x_had
                     )
             torch.cuda.current_stream().wait_stream(s)
+            torch.cuda.synchronize()
             graphs.append(g)
+            payloads.append((x, trellis, suh, svh, out, x_had))
             print(f"captured {name} K={bitrate} M={m} mcg={int(args.mcg)} mul1={int(args.mul1)}")
     for step in range(args.steps):
         graphs[step % len(graphs)].replay()
@@ -81,6 +85,7 @@ def main() -> int:
             print(f"replay {step}/{args.steps}")
     torch.cuda.synchronize()
     print(f"{args.steps} graph replay OK across {len(graphs)} graphs")
+    del payloads
     return 0
 
 
