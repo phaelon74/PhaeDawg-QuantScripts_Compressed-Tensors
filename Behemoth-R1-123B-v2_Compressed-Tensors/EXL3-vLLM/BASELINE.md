@@ -9,13 +9,15 @@ Frozen TP4 eager KLD results (204,700 positions, context 2048, stride 512):
 | Checkpoint | `du -sh` | Mean KLD | KLD throughput | Status |
 | --- | ---: | ---: | ---: | --- |
 | ArtusDev EXL3 3.5-bpw H6 | 51G | 0.045794 twice | 283.75 / 284.52 pos/s | Accepted memory-first |
-| ArtusDev EXL3 4.25-bpw H6 | 62G | **0.015800** | 278.61 pos/s | Current quality/size winner |
+| ArtusDev EXL3 4.25-bpw H6 | 62G | **0.015800** | 278.61 pos/s | Selected serving candidate |
+| Local EXL3 4.5-bpw H6 mul1 | 65G | **0.013475** | — | Quality winner; performance deferred |
 | Mixed AutoRound GS32 | 72G | 0.034004 | 605.23 pos/s | Frozen Marlin reference |
 | Original AWQ GS32 | 66G | 0.042380 | — | Historical minimum gate |
 
-The 4.25-bpw result is 53.5% lower KLD than the 72G AutoRound reference
-while using 10G less rounded disk space. KLD throughput was measured on a
-different vLLM/Torch stack and does not establish serving performance.
+The 4.5-bpw result is the lowest measured KLD. The 4.25-bpw checkpoint is the
+serving candidate because it preserves more VRAM for KV cache while remaining
+substantially better than the AutoRound reference. KLD throughput was measured
+on a different vLLM/Torch stack and does not establish serving performance.
 Receipt: [`results/behemoth_exl3_kld.json`](results/behemoth_exl3_kld.json).
 
 KLD scoring stays on the existing harness:
@@ -29,10 +31,9 @@ Do not compare Behemoth EXL3 KLD against GLM or any other model.
 ### EXL3 quality gates
 
 - 3.5-bpw is accepted as a memory-first tier at 0.045794.
-- Production candidates should beat 0.034004; 4.25-bpw already passes at
-  0.015800.
-- The 4.5-bpw H6 target should remain below 70G rounded and preserve or improve
-  the 4.25-bpw result. Measure rather than infer its KLD.
+- Production candidates should beat 0.034004; 4.25-bpw passes at 0.015800.
+- 4.5-bpw is the quality leader at 0.013475 and 65G, but is not selected for
+  performance testing because 4.25-bpw leaves more KV-cache headroom.
 
 ## Speed authority
 

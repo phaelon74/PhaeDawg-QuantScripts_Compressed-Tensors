@@ -25,6 +25,11 @@ if [[ ! -f "$CONVERT_PY" ]]; then
   echo "Missing ExLlamaV3 converter: $CONVERT_PY" >&2
   exit 2
 fi
+if ! python -c "import marisa_trie" >/dev/null 2>&1; then
+  echo "Missing compile-time dependency: marisa-trie" >&2
+  echo "Install it in the active conversion venv: python -m pip install marisa-trie" >&2
+  exit 2
+fi
 
 actual_pin="$(git -C "$EXLLAMAV3_SRC" rev-parse HEAD)"
 if [[ "$actual_pin" != "$PIN" ]]; then

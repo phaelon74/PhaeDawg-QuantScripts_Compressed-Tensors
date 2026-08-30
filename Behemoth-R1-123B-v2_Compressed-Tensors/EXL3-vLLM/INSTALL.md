@@ -432,7 +432,9 @@ install or upgrade packages during conversion. Confirm before starting:
 
 ```bash
 source /home/phaedawg/kld-exl3-vllm/kld-exl3-vllm/bin/activate
+python -m pip install marisa-trie
 python -c "import torch, exllamav3, exllamav3_ext; print(torch.__version__, torch.version.cuda, exllamav3_ext.__file__)"
+python -c "import marisa_trie; print(marisa_trie.__file__)"
 ```
 
 ### 6.2 Start or resume

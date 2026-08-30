@@ -10,8 +10,17 @@
     "calibration_note": "The AutoRound authority uses 512 samples (307 neuralmagic chat + 205 Rombo reasoning), seq 2048. Local EXL3 conversion uses ExLlamaV3's bundled 250x2048 default; the pinned bundled wiki splitter cannot supply 512 rows."
   },
   "checkpoints": {
+    "local_exl3_4p5_h6_mul1": {
+      "role": "current_quality_winner_performance_deferred",
+      "path": "/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/EXL3_4p5_H6_mul1",
+      "du_sh": "65G",
+      "bytes": 69660077687,
+      "mean_kld": 0.013475,
+      "backend": "EXL3 SM86 vLLM plugin, TP4 eager",
+      "note": "4.25-bpw selected for serving comparison to preserve more KV-cache headroom."
+    },
     "artusdev_exl3_4p25_h6": {
-      "role": "current_quality_size_winner",
+      "role": "selected_serving_candidate",
       "path": "/media/fmodels/ArtusDev/TheDrummer_Behemoth-R1-123B-v2-EXL3/4.25bpw_H6",
       "du_sh": "62G",
       "mean_kld": 0.015800,
@@ -58,8 +67,8 @@
   "exl3_quality_gates": {
     "memory_first_3p5_accepted_mean_kld": 0.045794,
     "production_candidate_max_mean_kld": 0.034004,
-    "current_best_mean_kld": 0.015800,
+    "current_best_mean_kld": 0.013475,
     "target_4p5_max_du_sh": "70G",
-    "note": "The 3.5-bpw tier is accepted for memory-first use. Production candidates should beat the former AutoRound winner; 4.25-bpw does. Do not compare against unrelated-model KLD numbers."
+    "note": "The 3.5-bpw tier is accepted for memory-first use. Production candidates should beat the former AutoRound winner; 4.25-bpw does. The 4.5-bpw quality leader is not selected for performance testing because 4.25-bpw leaves more KV-cache headroom. Do not compare against unrelated-model KLD numbers."
   }
 }

@@ -46,7 +46,20 @@
       "positions_per_second_runs": [
         278.61
       ],
-      "status": "current_quality_size_winner"
+      "status": "selected_deployment_candidate"
+    },
+    {
+      "name": "Local EXL3 4.5bpw_H6_mul1",
+      "path": "/media/fmodels/TheHouseOfTheDude/Behemoth-R1-123B-v2/NewQuants/EXL3_4p5_H6_mul1",
+      "du_sh": "65G",
+      "bytes": 69660077687,
+      "gib": 64.88,
+      "mean_kld_runs": [
+        0.013475
+      ],
+      "positions_per_second_runs": [],
+      "status": "current_quality_winner_not_selected_for_performance_test",
+      "note": "4.25-bpw selected for serving comparison to preserve more KV-cache headroom."
     }
   ],
   "references": {
