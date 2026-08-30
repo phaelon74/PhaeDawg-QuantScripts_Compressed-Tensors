@@ -32,6 +32,8 @@ unset VLLM_EXL3_ALLOW_VLLM_DRIFT
 unset VLLM_EXL3_SKIP_VERSION_GUARD
 unset VLLM_EXL3_FORCE_COMPRESSED
 unset VLLM_EXL3_FORCE_RECONSTRUCT
+# AutoRound uses the vLLM default runner; do not inherit the EXL3/KLD V1 pin.
+unset VLLM_USE_V2_MODEL_RUNNER
 
 API_KEY="${1:-${VLLM_API_KEY:-}}"
 if [[ -z "$API_KEY" ]]; then
@@ -60,12 +62,12 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
 TOKENIZER_MODE="${TOKENIZER_MODE:-hf}"
-CONFIG_FORMAT="${CONFIG_FORMAT:-auto}"
-LOAD_FORMAT="${LOAD_FORMAT:-auto}"
+CONFIG_FORMAT="auto"
+LOAD_FORMAT="auto"
 
 # This checkpoint carries compressed-tensors metadata for mixed group-size-32
 # AutoRound weights. vLLM dispatches supported layers through Marlin.
-QUANTIZATION="${QUANTIZATION:-compressed-tensors}"
+QUANTIZATION="compressed-tensors"
 
 REASONING_PARSER="${REASONING_PARSER:-}"
 REASONING_CONFIG="${REASONING_CONFIG:-}"
@@ -74,12 +76,10 @@ TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-mistral}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 
 # Preserve the currently validated compiled decode configuration.
-CUDAGRAPH_MODE="${CUDAGRAPH_MODE:-full_decode_only}"
-CUDAGRAPH_CAPTURE_SIZES="${CUDAGRAPH_CAPTURE_SIZES:-[1,2,4]}"
-if [[ -z "${COMPILATION_CONFIG:-}" ]]; then
-  COMPILATION_CONFIG="{\"mode\":3,\"cudagraph_mode\":\"${CUDAGRAPH_MODE}\",\"cudagraph_capture_sizes\":${CUDAGRAPH_CAPTURE_SIZES}}"
-fi
-MAX_CUDAGRAPH_CAPTURE_SIZE="${MAX_CUDAGRAPH_CAPTURE_SIZE:-}"
+CUDAGRAPH_MODE="${AUTOROUND_CUDAGRAPH_MODE:-full_decode_only}"
+CUDAGRAPH_CAPTURE_SIZES="${AUTOROUND_CUDAGRAPH_CAPTURE_SIZES:-[1,2,4]}"
+COMPILATION_CONFIG="${AUTOROUND_COMPILATION_CONFIG:-{\"mode\":3,\"cudagraph_mode\":\"${CUDAGRAPH_MODE}\",\"cudagraph_capture_sizes\":${CUDAGRAPH_CAPTURE_SIZES}}}"
+MAX_CUDAGRAPH_CAPTURE_SIZE="${AUTOROUND_MAX_CUDAGRAPH_CAPTURE_SIZE:-}"
 
 VLLM_ARGS=(
   "$MODEL_DIR"

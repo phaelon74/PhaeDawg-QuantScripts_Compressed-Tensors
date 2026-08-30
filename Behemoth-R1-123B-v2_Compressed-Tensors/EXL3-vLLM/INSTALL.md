@@ -547,7 +547,8 @@ Gates:
 
 - 3.5-bpw memory-first receipt: **0.045794** reproducibly
 - production candidate: mean KLD < **0.034004**
-- current EXL3 leader: 4.25-bpw at **0.015800**
+- current EXL3 quality leader: 4.5-bpw at **0.013475**
+- selected serving candidate: 4.25-bpw at **0.015800** for greater KV headroom
 - TP4 BF16 KV pool capacity greater than 32K tokens
 - do not compare against GLM KLD numbers
 
@@ -591,10 +592,9 @@ MODEL_DIR="$MODEL_DIR" ./scripts/restart_test.sh
 
 ### Remote serving benchmark: 1K through 32K
 
-Serve one checkpoint at a time with the same TP4, eager/graph, maximum model
-length, batching, and KV-cache settings. For the first comparison, use eager
-for all three backends to isolate quantization/backend behavior. The server
-must permit at least 32,768 prompt + 256 output tokens.
+Serve one checkpoint at a time with the same TP4, maximum model length,
+batching, KV-cache settings, and compiled decode-graph policy. The server must
+permit at least 32,768 prompt + 256 output tokens.
 
 Run the client on the same machine or same LAN path for every model because
 TTFT includes network and scheduler delay:
@@ -620,16 +620,9 @@ Repeat without changing client/server topology:
 # 69.5G mixed Intel AutoRound / compressed-tensors server
 python scripts/bench_serving_contexts.py \
   --host 192.0.2.10 --api-key "$VLLM_API_KEY" \
-  --model Behemoth-R1-123B-v2-AutoRound-69p5G \
+  --model Behemoth-R1-123B-v2-AutoRound-GS32-Mixed-69p5G \
   --label autoround-69p5g \
   --output results/serving_autoround_69p5g.json
-
-# Local 4.5-bpw EXL3 server
-python scripts/bench_serving_contexts.py \
-  --host 192.0.2.10 --api-key "$VLLM_API_KEY" \
-  --model Behemoth-R1-123B-v2-EXL3-4.5-H6 \
-  --label local-exl3-4p5 \
-  --output results/serving_local_exl3_4p5.json
 ```
 
 The default contexts are already 1K/2K/4K/8K/16K/32K, with one warmup and
@@ -667,7 +660,8 @@ experimental memory-first and leave the 72G Marlin checkpoint in production.
 8. Convert 4.5-bpw H6 mul1 from BF16 on physical GPU 1; retain work state.
 9. Validate inventory and exact bytes; TP4 eager load on physical 1–4.
 10. Score 4.5-bpw over all 204,700 positions with the same reference logits.
-11. Benchmark 4.25 and 4.5 EXL3 against Marlin; then evaluate graphs and restart.
+11. Benchmark 4.25 EXL3 against the 69.5G AutoRound server with decode graphs;
+    defer 4.5-bpw performance testing in favor of additional KV-cache headroom.
 
 ---
 
