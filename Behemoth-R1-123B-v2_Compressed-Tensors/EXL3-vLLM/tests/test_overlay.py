@@ -19,6 +19,8 @@ def test_overlay_files_exist():
     assert "SEL_GRID(5, 0" in text
     assert "EXL3_INT8_GEMV_CB" in text
     assert "exl3_gemv_allow_3inst" in text
+    assert "Do not hook decode_3inst" in text
+    assert "exl3_lut_decode<cb>(x)" in text  # leftover-hook stripper only
 
 
 def test_codebook_flags_cover_all_three():

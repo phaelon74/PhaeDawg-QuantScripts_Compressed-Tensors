@@ -12,10 +12,12 @@ What the overlay changes:
 1. **QTIP GEMV eligibility** (`exl3_gemv.cu`): K=2..8, implicit 3inst (cb=0)
    when `EXL3_GEMV>=2` or `EXL3_GEMV_3INST=1`, plus compiled instances for
    those shapes.
-2. **16-bit codebook LUT** (`codebook_lut.cuh`, `exl3_decode_lut.cu`):
-   65536 fp16 entries per codebook in global memory, `__ldg` in
-   `decode_3inst` / `decode_3inst_2`. Default on; `EXL3_GEMV_LUT=0` disables.
-   A full 16-bit table is 128 KiB and does not fit in SM86 smem (100 KiB).
+2. **16-bit codebook LUT fill** (`exl3_decode_lut.cu`): 65536 fp16 entries
+   per codebook in global memory. Compiled but not invoked yet: without
+   `-rdc`, nvcc treats `extern __constant__` as a per-translation-unit
+   static (warning 20044), so a flag set in the fill TU never reaches GEMM
+   kernels. Arithmetic `decode_3inst` stays live. `EXL3_GEMV_LUT=0` is
+   reserved for when the LUT is wired as a GEMV kernel argument.
 3. **INT8-activation GEMV on 3inst** (`exl3_gemm.cu`): `EXL3_INT8_GEMV_CB=1`
    also tries `exl3_gemv_int8` for cb=0. Default off. KLD-gate before serving.
 

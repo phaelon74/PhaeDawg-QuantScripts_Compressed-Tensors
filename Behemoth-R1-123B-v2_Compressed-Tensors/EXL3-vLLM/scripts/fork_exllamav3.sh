@@ -24,6 +24,10 @@ if [[ ! -d "$DEST/.git" && ! -f "$DEST/.git" ]]; then
     git clone "$UPSTREAM_URL" "$DEST"
     git -C "$DEST" checkout "$PIN"
     git -C "$DEST" checkout -B "$BRANCH"
+    if [[ ! -d "$DEST/exllamav3/exllamav3_ext/quant" && ! -d "$DEST/exllamav3_ext/quant" ]]; then
+      echo "WARNING: clone at $DEST is missing quant/; overlay skipped."
+      exit 0
+    fi
     python3 "$EXL3/kernel/overlay/apply_overlay.py" "$DEST"
     echo "Push this tree to $FORK_URL when the GitHub fork exists:"
     echo "  git -C \"$DEST\" remote add fork $FORK_URL"
@@ -33,6 +37,11 @@ if [[ ! -d "$DEST/.git" && ! -f "$DEST/.git" ]]; then
 fi
 
 git -C "$DEST" fetch --all --tags || true
+if [[ ! -d "$DEST/exllamav3/exllamav3_ext/quant" && ! -d "$DEST/exllamav3_ext/quant" ]]; then
+  echo "WARNING: $DEST is not a full ExLlamaV3 tree; overlay skipped."
+  echo "build_exllamav3_ext.sh will use \$HOME/src/exllamav3 instead."
+  exit 0
+fi
 python3 "$EXL3/kernel/overlay/apply_overlay.py" "$DEST"
 echo "Submodule/checkout ready at $DEST"
 echo "Rebuild with: bash \"$EXL3/scripts/build_exllamav3_ext.sh\""

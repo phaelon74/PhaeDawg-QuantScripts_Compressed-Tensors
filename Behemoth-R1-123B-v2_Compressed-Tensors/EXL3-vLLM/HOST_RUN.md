@@ -100,7 +100,7 @@ Kernel env vars the overlay reads (export before `vllm serve`):
 | --- | --- | --- |
 | `EXL3_GEMV` | 1 | 0=off, 1=heuristic, 2=force eligible GEMV |
 | `EXL3_GEMV_3INST` | unset | 1=allow cb=0 GEMV at K!=4 |
-| `EXL3_GEMV_LUT` | 1 after overlay | 0=arithmetic 3INST |
+| `EXL3_GEMV_LUT` | reserved | LUT fill is compiled, not wired into decode yet |
 | `EXL3_INT8_GEMV` | 2 in upstream | 0=off |
 | `EXL3_INT8_GEMV_CB` | 0 | 1=try int8 activations on 3inst |
 | `EXL3_INT8_GEMV_MAX_K` | arch default | 5 on Ampere |

@@ -8,8 +8,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PIN="${EXLLAMAV3_COMMIT:-$(python3 -c 'import json,pathlib; print(json.loads(pathlib.Path(r"'"$ROOT"'/manifests/stack.json").read_text())["exllamav3"]["pinned_commit"])')}"
 SUBMODULE="$ROOT/exllamav3"
 SRC="${EXLLAMAV3_SRC:-}"
+_has_quant() {
+  local root="$1"
+  [[ -d "$root/exllamav3/exllamav3_ext/quant" || -d "$root/exllamav3_ext/quant" ]]
+}
 if [[ -z "$SRC" ]]; then
-  if [[ -d "$SUBMODULE/.git" || -f "$SUBMODULE/.git" ]]; then
+  if { [[ -d "$SUBMODULE/.git" ]] || [[ -f "$SUBMODULE/.git" ]]; } && _has_quant "$SUBMODULE"; then
     SRC="$SUBMODULE"
   else
     SRC="${HOME}/src/exllamav3"
@@ -26,7 +30,7 @@ fi
 
 if [[ "$SRC" != "$SUBMODULE" ]]; then
   git -C "$SRC" fetch --all --tags
-  git -C "$SRC" checkout "$PIN"
+  git -C "$SRC" checkout -f "$PIN"
 fi
 
 if [[ "$APPLY_OVERLAY" == "1" ]]; then

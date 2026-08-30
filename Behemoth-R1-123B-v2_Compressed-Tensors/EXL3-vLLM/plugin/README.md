@@ -20,5 +20,5 @@ Decode path:
 
 - CUDA-graph capture sizes `1,2,3,4,5,6,8` (spec decode)
 - fused `exl3_mgemm` for matching gate/up and for matching k/v
-- SM86 overlay: codebook LUT (`EXL3_GEMV_LUT`), 3inst GEMV (`EXL3_GEMV=2`), optional `EXL3_INT8_GEMV_CB`
+- SM86 overlay: 3inst GEMV (`EXL3_GEMV=2`), optional `EXL3_INT8_GEMV_CB`
 - n-gram spec decode: `EXL3_NGRAM_SPEC=1` on the 4.25 launcher

@@ -56,38 +56,18 @@ INT8_GATE_NEW = (
     f"// {MARKER}"
 )
 
-CODEBOOK_INCLUDE_OLD = '#include "codebook.cuh"'
-# we'll include lut from codebook.cuh itself
 
-CODEBOOK_HOOK_OLD = """template <int cb>
-__device__ inline half decode_3inst(uint32_t x)
-{
- if constexpr (cb == 0)
- {"""
-
-CODEBOOK_HOOK_NEW = f"""#include "codebook_lut.cuh"
-
-template <int cb>
-__device__ inline half decode_3inst(uint32_t x)
-{{
- if (exl3_lut_enabled())
-     return exl3_lut_decode<cb>(x);
- if constexpr (cb == 0)
- {{"""
-
-CODEBOOK_HOOK2_OLD = """template <int cb>
-__device__ inline half2 decode_3inst_2(uint32_t x0, uint32_t x1)
-{
- if constexpr (cb == 0)
- {"""
-
-CODEBOOK_HOOK2_NEW = f"""template <int cb>
-__device__ inline half2 decode_3inst_2(uint32_t x0, uint32_t x1)
-{{
- if (exl3_lut_enabled())
-     return __halves2half2(exl3_lut_decode<cb>(x0), exl3_lut_decode<cb>(x1));
- if constexpr (cb == 0)
- {{"""
+def _quant_dir(src: Path) -> Path:
+    candidates = [
+        src / "exllamav3" / "exllamav3_ext" / "quant",
+        src / "exllamav3_ext" / "quant",
+    ]
+    for quant in candidates:
+        if quant.is_dir():
+            return quant
+    raise SystemExit(
+        f"not an ExLlamaV3 tree: {src} (no {candidates[0]})"
+    )
 
 
 def _replace_once(text: str, old: str, new: str, path: Path) -> str:
@@ -99,9 +79,7 @@ def _replace_once(text: str, old: str, new: str, path: Path) -> str:
 
 
 def apply(src: Path) -> None:
-    quant = src / "exllamav3" / "exllamav3_ext" / "quant"
-    if not quant.is_dir():
-        raise SystemExit(f"not an ExLlamaV3 tree: {src}")
+    quant = _quant_dir(src)
 
     shutil.copy2(OVERLAY_DIR / "codebook_lut.cuh", quant / "codebook_lut.cuh")
     shutil.copy2(OVERLAY_DIR / "exl3_decode_lut.cu", quant / "exl3_decode_lut.cu")
@@ -139,63 +117,42 @@ def apply(src: Path) -> None:
 
     gemm = quant / "exl3_gemm.cu"
     text = gemm.read_text(encoding="utf-8")
+    if "#include <cstdlib>" not in text:
+        text = "#include <cstdlib>\n" + text
     if "EXL3_INT8_GEMV_CB" not in text:
         text = _replace_once(text, INT8_GATE_OLD, INT8_GATE_NEW, gemm)
-    if "exl3_lut_ensure" not in text:
-        needle = "int exl3_gemm_gr"
-        if needle not in text:
-            raise SystemExit(f"{gemm}: missing exl3_gemm_gr")
-        text = text.replace(
-            needle,
-            f'extern void exl3_lut_ensure();\n\n// {MARKER}\nint exl3_gemm_gr',
-            1,
-        )
-        launch_need = "const at::cuda::OptionalCUDAGuard device_guard(A.device());"
-        if launch_need not in text:
-            raise SystemExit(f"{gemm}: missing device_guard")
-        text = text.replace(
-            launch_need,
-            launch_need + "\n    exl3_lut_ensure();",
-            1,
-        )
+    # Drop leftover lut_ensure inject from the previous overlay (cudaMalloc
+    # inside gemm_gr is unsafe during CUDA graph capture).
+    text = text.replace("    exl3_lut_ensure();\n", "")
+    text = text.replace(
+        f"extern void exl3_lut_ensure();\n\n// {MARKER}\n",
+        "",
+    )
     gemm.write_text(text, encoding="utf-8")
 
+    # Do not hook decode_3inst in codebook.cuh. Without -rdc, nvcc treats
+    # extern device symbols as per-TU statics (warning 20044), so a LUT flag
+    # set in exl3_decode_lut.cu never reaches GEMM kernels. Strip leftover
+    # hooks from the previous overlay so arithmetic decode stays live.
     codebook = quant / "codebook.cuh"
-    text = codebook.read_text(encoding="utf-8")
-    if "codebook_lut.cuh" not in text:
-        if '#include "codebook_lut.cuh"' not in text:
-            # Insert the LUT include after the last existing include / pragma block.
-            needle = '#pragma once'
-            if needle in text:
-                text = text.replace(
-                    needle, needle + '\n\n#include "codebook_lut.cuh"\n', 1
-                )
-            else:
-                text = '#include "codebook_lut.cuh"\n' + text
-        if "exl3_lut_enabled()" not in text:
-            hook = (
-                " if (exl3_lut_enabled())\n"
-                "     return exl3_lut_decode<cb>(x);\n"
-            )
-            key = "__device__ inline half decode_3inst"
-            idx = text.find(key)
-            if idx < 0:
-                raise SystemExit(f"{codebook}: decode_3inst not found")
-            brace = text.find("{", idx)
-            text = text[: brace + 1] + "\n" + hook + text[brace + 1 :]
-        if "exl3_lut_decode<cb>(x0)" not in text:
-            hook2 = (
-                " if (exl3_lut_enabled())\n"
-                "     return __halves2half2(exl3_lut_decode<cb>(x0), "
-                "exl3_lut_decode<cb>(x1));\n"
-            )
-            key = "__device__ inline half2 decode_3inst_2"
-            idx = text.find(key)
-            if idx < 0:
-                raise SystemExit(f"{codebook}: decode_3inst_2 not found")
-            brace = text.find("{", idx)
-            text = text[: brace + 1] + "\n" + hook2 + text[brace + 1 :]
-    codebook.write_text(text, encoding="utf-8")
+    if codebook.is_file():
+        cb_text = codebook.read_text(encoding="utf-8")
+        stripped = cb_text
+        stripped = stripped.replace('#include "codebook_lut.cuh"\n\n', "")
+        stripped = stripped.replace('#include "codebook_lut.cuh"\n', "")
+        stripped = stripped.replace(
+            " if (exl3_lut_enabled())\n"
+            "     return exl3_lut_decode<cb>(x);\n",
+            "",
+        )
+        stripped = stripped.replace(
+            " if (exl3_lut_enabled())\n"
+            "     return __halves2half2(exl3_lut_decode<cb>(x0), "
+            "exl3_lut_decode<cb>(x1));\n",
+            "",
+        )
+        if stripped != cb_text:
+            codebook.write_text(stripped, encoding="utf-8")
 
     stamp = quant / ".sm86_overlay_applied"
     stamp.write_text(MARKER + "\n", encoding="utf-8")

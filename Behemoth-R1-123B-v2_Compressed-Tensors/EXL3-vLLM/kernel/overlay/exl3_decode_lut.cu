@@ -3,6 +3,9 @@
 #include <cstdlib>
 #include <mutex>
 
+// codebook.cuh uses half_uint16 / half2_uint32 from util.cuh; those types are
+// not declared in codebook.cuh itself.
+#include "../util.cuh"
 #include "codebook.cuh"
 
 __constant__ int exl3_lut_ready_flag = 0;
