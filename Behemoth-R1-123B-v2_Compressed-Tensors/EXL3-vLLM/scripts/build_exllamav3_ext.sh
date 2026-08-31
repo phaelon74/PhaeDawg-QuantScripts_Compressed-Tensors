@@ -47,7 +47,11 @@ print("torch", torch.__version__, "cuda", torch.version.cuda, "abi", torch._C._G
 print("python", sys.version)
 PY
 
-pip install --no-build-isolation --no-deps -e "$SRC"
+if command -v uv >/dev/null 2>&1; then
+  uv pip install --python "$(command -v python3)" --no-build-isolation --no-deps -e "$SRC"
+else
+  pip install --no-build-isolation --no-deps -e "$SRC"
+fi
 
 mkdir -p "$OUT"
 python3 - <<'PY'
