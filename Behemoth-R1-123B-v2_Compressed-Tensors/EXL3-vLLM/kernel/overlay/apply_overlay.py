@@ -163,7 +163,7 @@ K56_DECODE_BRANCH_NEW = """                    if constexpr (bits == 5 || bits =
 K56_REGISTER_MARKER = f"{MARKER}: K5/K6 register extraction"
 K56_REGISTER_HELPER = f"""
 // {K56_REGISTER_MARKER}: one four-value trellis window.
-template <int bits>
+template <int bits, int cb>
 __device__ __forceinline__ void dq4_regs_k56
 (
     uint32_t a,
@@ -176,8 +176,8 @@ __device__ __forceinline__ void dq4_regs_k56
     uint32_t w2 = fshift(b, a, s2 + bits) & 0xffff;
     uint32_t w1 = fshift(b, a, s2 + bits * 2) & 0xffff;
     uint32_t w0 = fshift(b, a, s2 + bits * 3) & 0xffff;
-    frag[0] = decode_3inst_2(w0, w1);
-    frag[1] = decode_3inst_2(w2, w3);
+    frag[0] = decode_3inst_2<cb>(w0, w1);
+    frag[1] = decode_3inst_2<cb>(w2, w3);
 }}
 """
 
@@ -222,7 +222,7 @@ K56_REGISTER_DECODE = """                else if constexpr (bits == 5 || bits ==
                         0xffffffffu, hi, x56_b0 & 31);
                     uint32_t av = x56_a0 < 32 ? av_lo : av_hi;
                     uint32_t bv = x56_b0 < 32 ? bv_lo : bv_hi;
-                    exl3_gemv_ns::dq4_regs_k56<bits>(
+                    exl3_gemv_ns::dq4_regs_k56<bits, cb>(
                         av, bv, x56_s0, f0);
 
                     av_lo = __shfl_sync(
@@ -235,7 +235,7 @@ K56_REGISTER_DECODE = """                else if constexpr (bits == 5 || bits ==
                         0xffffffffu, hi, x56_b1 & 31);
                     av = x56_a1 < 32 ? av_lo : av_hi;
                     bv = x56_b1 < 32 ? bv_lo : bv_hi;
-                    exl3_gemv_ns::dq4_regs_k56<bits>(
+                    exl3_gemv_ns::dq4_regs_k56<bits, cb>(
                         av, bv, x56_s1, f1);
                 }
 """
