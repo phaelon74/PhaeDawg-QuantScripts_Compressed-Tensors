@@ -20,6 +20,14 @@ def test_overlay_files_exist():
     assert "SEL_GRID(5, 0" not in text
     assert "EXL3_INT8_GEMV_CB" in text
     assert "exl3_gemv_allow_3inst" in text
+    assert "measured RTX 3090 M=1 policy" in text
+    assert "size_k == 12288 && size_n == 7168" in text
+    assert "size_k == 12288 && (size_n == 3072 || size_n == 256)" in text
+    assert "EXL3_GEMV_K56" in text
+    assert "SEL(5, 0, false, 0, 0, true)" in text
+    assert "K5/K6 lightweight staged GEMV" in text
+    assert "word < TWORDS" in text
+    assert "dq_dispatch<bits, cb>(tp, lane << 3, f0, f1)" in text
     assert "Do not hook decode_3inst" in text
     assert "exl3_lut_decode<cb>(x)" in text  # leftover-hook stripper only
 

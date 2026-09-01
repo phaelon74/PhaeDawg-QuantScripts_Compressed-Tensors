@@ -57,17 +57,60 @@ def _native_compressed(ext, x, trellis, suh, svh, mcg: bool, mul1: bool):
     return output
 
 
-def _reconstruct_ref(ext, x, trellis, suh, svh, bitrate: int):
+def _reconstruct_ref(
+    ext,
+    x,
+    trellis,
+    suh,
+    svh,
+    bitrate: int,
+    *,
+    mcg: bool = False,
+    mul1: bool = True,
+):
     k = trellis.shape[0] * TRELLIS_TILE
     n = trellis.shape[1] * TRELLIS_TILE
     w = torch.empty((k, n), dtype=torch.float16, device=x.device)
-    ext.reconstruct(w, trellis, bitrate, False, True)
+    ext.reconstruct(w, trellis, bitrate, mcg, mul1)
     xh = torch.empty_like(x)
     ext.had_r_128(x, xh, suh, None, 1.0)
     ref = torch.empty((x.shape[0], n), dtype=torch.float16, device=x.device)
     ext.hgemm(xh, w, ref)
     ext.had_r_128(ref, ref, None, svh, 1.0)
     return ref
+
+
+@pytest.mark.parametrize("bitrate", [5, 6])
+def test_k56_3inst_gemv_matches_reconstruct(bitrate, monkeypatch):
+    monkeypatch.setenv("EXL3_GEMV_K56", "1")
+    monkeypatch.setenv("VLLM_EXL3_FORCE_COMPRESSED", "1")
+    monkeypatch.delenv("VLLM_EXL3_FORCE_RECONSTRUCT", raising=False)
+    ext = _ext()
+    from vllm_exl3_sm86.ops import call_exl3_gemm
+
+    device = torch.device("cuda")
+    x, trellis, suh, svh = _payloads(
+        bitrate, 1, torch.float16, device
+    )
+    got = call_exl3_gemm(
+        x, trellis, suh, svh, mcg=False, mul1=False
+    )
+    ref = _reconstruct_ref(
+        ext,
+        x,
+        trellis,
+        suh,
+        svh,
+        bitrate,
+        mcg=False,
+        mul1=False,
+    )
+    torch.cuda.synchronize()
+    if not torch.allclose(got, ref, rtol=5e-2, atol=0.75):
+        max_err = (got.float() - ref.float()).abs().max().item()
+        pytest.fail(
+            f"K{bitrate} 3inst GEMV parity failed: max_err={max_err}"
+        )
 
 
 @pytest.mark.parametrize("bitrate", [1, 2, 3, 4, 5, 6, 7, 8])

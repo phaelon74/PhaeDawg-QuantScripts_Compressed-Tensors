@@ -127,6 +127,16 @@ def main() -> int:
     parser.add_argument("--iters", type=int, default=30)
     parser.add_argument("--bitrates", default="3,4,5,6")
     parser.add_argument(
+        "--shapes",
+        default="",
+        help="Comma-separated projection names. Default tests every shape.",
+    )
+    parser.add_argument(
+        "--gemv-k56",
+        action="store_true",
+        help="Set EXL3_GEMV_K56=1 for the opt-in M=1 cb0 kernel.",
+    )
+    parser.add_argument(
         "--m",
         default="",
         help="Token counts to time. Default is decode sizes 1,2,4 unless --full-m.",
@@ -167,10 +177,24 @@ def main() -> int:
         print("CUDA is required", file=sys.stderr)
         return 2
 
+    if args.gemv_k56:
+        os.environ["EXL3_GEMV_K56"] = "1"
     torch.cuda.set_device(args.device)
     device = torch.device("cuda", args.device)
     ext = _load_exl3_ext()
     bitrates = [int(x) for x in args.bitrates.split(",") if x.strip()]
+    shape_names = (
+        [x.strip() for x in args.shapes.split(",") if x.strip()]
+        if args.shapes
+        else list(BEHEMOTH_TP4_SHAPES)
+    )
+    unknown_shapes = sorted(set(shape_names) - set(BEHEMOTH_TP4_SHAPES))
+    if unknown_shapes:
+        print(
+            f"unknown shapes: {','.join(unknown_shapes)}",
+            file=sys.stderr,
+        )
+        return 2
     if args.m:
         ms = [int(x) for x in args.m.split(",") if x.strip()]
     elif args.full_m:
@@ -183,9 +207,11 @@ def main() -> int:
     failures = []
     print(
         f"codebook={codebook} mcg={int(args.mcg)} mul1={int(args.mul1)} "
-        f"bitrates={bitrates} m={ms} device={args.device}"
+        f"bitrates={bitrates} m={ms} shapes={shape_names} "
+        f"gemv_k56={int(args.gemv_k56)} device={args.device}"
     )
-    for name, (k, n) in BEHEMOTH_TP4_SHAPES.items():
+    for name in shape_names:
+        k, n = BEHEMOTH_TP4_SHAPES[name]
         for bitrate in bitrates:
             if name == "lm_head" and bitrate != 6:
                 continue
@@ -313,6 +339,8 @@ def main() -> int:
                 "codebook": codebook,
                 "mcg": bool(args.mcg),
                 "mul1": bool(args.mul1),
+                "gemv_k56": bool(args.gemv_k56),
+                "shapes": shape_names,
                 "rows": rows,
                 "failures": failures,
                 "decode_budget": budget,

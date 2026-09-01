@@ -9,17 +9,22 @@ Upstream pin: `0c49587a7c235e6303a6bbedc8b665272ad3a2ea`
 
 What the overlay changes:
 
-1. **QTIP GEMV eligibility** (`exl3_gemv.cu`): implicit 3inst (cb=0) at
-   K=2 and K=3 when `EXL3_GEMV>=2` or `EXL3_GEMV_3INST=1`. K=4 3inst is
-   already eligible upstream. The GEMV kernel `static_assert`s 2/3/4 bpw
-   only — do not instantiate K=5..8.
-2. **16-bit codebook LUT fill** (`exl3_decode_lut.cu`): 65536 fp16 entries
+1. **QTIP GEMV dispatch** (`exl3_gemv.cu`): implicit 3inst (cb=0) at K=2
+   and K=3 when `EXL3_GEMV>=2` or `EXL3_GEMV_3INST=1`. At K=4/M=1/SM86,
+   heuristic mode uses the measured Behemoth TP4 policy: regular q/k/v and
+   narrow GEMV o/gate/up/down.
+2. **Experimental K5/K6 GEMV** (`exl3_gemv_kernel.cuh`): when
+   `EXL3_GEMV_K56=1`, M=1 cb0 fp16 calls use one narrow 512-thread kernel.
+   Each warp coalesces the 40/48-word trellis tile into compact private
+   shared memory before the existing K5/K6 `dq_dispatch`. K5/K6 remain
+   opt-in until parity, ptxas spill, NCU occupancy, and serving gates pass.
+3. **16-bit codebook LUT fill** (`exl3_decode_lut.cu`): 65536 fp16 entries
    per codebook in global memory. Compiled but not invoked yet: without
    `-rdc`, nvcc treats `extern __constant__` as a per-translation-unit
    static (warning 20044), so a flag set in the fill TU never reaches GEMM
    kernels. Arithmetic `decode_3inst` stays live. `EXL3_GEMV_LUT=0` is
    reserved for when the LUT is wired as a GEMV kernel argument.
-3. **INT8-activation GEMV on 3inst** (`exl3_gemm.cu`): `EXL3_INT8_GEMV_CB=1`
+4. **INT8-activation GEMV on 3inst** (`exl3_gemm.cu`): `EXL3_INT8_GEMV_CB=1`
    also tries `exl3_gemv_int8` for cb=0. Default off. KLD-gate before serving.
 
 Markers: `Phaedawg-SM86-overlay`. Re-running the applier is idempotent.
@@ -29,3 +34,33 @@ export EXL3=/home/phaedawg/kld-exl3-vllm/PhaeDawg-QuantScripts_Compressed-Tensor
 bash "$EXL3/scripts/fork_exllamav3.sh"
 bash "$EXL3/scripts/build_exllamav3_ext.sh"
 ```
+
+K5/K6 acceptance sequence on one RTX 3090:
+
+```bash
+export EXL3_GEMV=1
+export EXL3_GEMV_SMEM=0  # K5/K6 override this to the compact staged path
+
+EXL3_GEMV_K56=1 python -m pytest tests/test_cuda_parity.py \
+  -k 'k56_3inst_gemv' -q
+
+unset EXL3_GEMV_K56
+python scripts/kernel_microbench.py \
+  --device 0 --bitrates 5,6 --m 1 \
+  --shapes q_proj,k_proj,o_proj,gate_proj,down_proj \
+  --warmup 10 --iters 50 \
+  --output results/k56_regular_m1.json
+
+python scripts/kernel_microbench.py \
+  --device 0 --bitrates 5,6 --m 1 \
+  --shapes q_proj,k_proj,o_proj,gate_proj,down_proj \
+  --gemv-k56 --warmup 10 --iters 50 \
+  --output results/k56_gemv_m1.json
+
+sudo -E bash scripts/profile_ncu_gate.sh \
+  results/phase0/ncu_down_k5_k56 down_proj 5 k56
+```
+
+Do not serve with `EXL3_GEMV_K56=1` unless parity passes, ptxas reports no
+spills, occupancy is at least 33%, and every selected projection beats the
+regular-kernel baseline.
