@@ -143,6 +143,7 @@ def make_prompt_tokens(
     target_tokens: int,
     *,
     style: str,
+    no_think: bool = True,
 ) -> tuple[list[int], str]:
     """Exact-length unique prompt. Returns (token ids, source text).
 
@@ -155,10 +156,16 @@ def make_prompt_tokens(
         raise ValueError(f"unknown prompt style: {style}")
 
     seed = uuid.uuid4().hex
+    think_rule = (
+        "Do not write <think> tags or hidden reasoning; write the scene only. "
+        if no_think
+        else ""
+    )
     tail = (
         "\n\nIgnore the identifier noise above. Write a coherent original "
         "scene about a lighthouse keeper in a winter storm. Do not repeat "
         "yourself and do not copy the identifiers. "
+        f"{think_rule}"
         f"Seed {seed}. Continuation:\n"
     )
     tail_tokens = client.tokenize(model, tail)
@@ -411,6 +418,13 @@ def main() -> int:
         "prose, not hex. uuid: incompressible ID stream only.",
     )
     parser.add_argument(
+        "--no-think",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="English prompts: forbid <think> so completions are the scene. "
+        "Use --no-no-think to allow R1 reasoning traces.",
+    )
+    parser.add_argument(
         "--temperature",
         type=float,
         default=0.0,
@@ -504,6 +518,7 @@ def main() -> int:
         "warmup_runs_per_context": args.warmup_runs,
         "request_concurrency": 1,
         "prompt_style": args.prompt_style,
+        "no_think": args.no_think,
         "temperature": args.temperature,
         "ignore_eos": args.ignore_eos,
         "prompt_format": prompt_notes[args.prompt_style],
@@ -525,8 +540,8 @@ def main() -> int:
     print(
         f"contexts={contexts} output_tokens={args.output_tokens} "
         f"runs={args.runs} warmups={args.warmup_runs} "
-        f"prompt_style={args.prompt_style} temperature={args.temperature} "
-        f"ignore_eos={args.ignore_eos}"
+        f"prompt_style={args.prompt_style} no_think={args.no_think} "
+        f"temperature={args.temperature} ignore_eos={args.ignore_eos}"
     )
     max_needed = max(contexts) + args.output_tokens
     print(
@@ -543,6 +558,7 @@ def main() -> int:
             args.model,
             token_count,
             style=args.prompt_style,
+            no_think=args.no_think,
         )
         result = run_once(
             client,
@@ -576,6 +592,7 @@ def main() -> int:
                     "context_tokens": context,
                     "run": run_number,
                     "prompt_style": args.prompt_style,
+                    "no_think": args.no_think,
                     "temperature": args.temperature,
                     "ignore_eos": args.ignore_eos,
                     "prompt_tail": prompt_text[-args.prompt_tail_chars :],
