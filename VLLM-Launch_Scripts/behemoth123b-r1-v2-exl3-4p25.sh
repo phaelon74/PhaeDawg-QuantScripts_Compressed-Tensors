@@ -36,6 +36,15 @@ unset VLLM_MARLIN_USE_ATOMIC_ADD
 unset VLLM_EXL3_FORCE_COMPRESSED
 unset VLLM_EXL3_FORCE_RECONSTRUCT
 
+# The mgemm flags change which custom ops are traced into the compiled model.
+# vLLM's AOT cache key does not include plugin environment variables, so a
+# cached graph from another fusion policy can reference absent workspaces.
+if [[ -n "${VLLM_EXL3_DISABLE_MGEMM:-}" ||
+      -n "${VLLM_EXL3_DISABLE_PAIR_MGEMM:-}" ||
+      -n "${VLLM_EXL3_DISABLE_KV_MGEMM:-}" ]]; then
+  export VLLM_DISABLE_COMPILE_CACHE=1
+fi
+
 API_KEY="${1:-${VLLM_API_KEY:-}}"
 if [[ -z "$API_KEY" ]]; then
   echo "Usage: $0 API-KEY-HERE" >&2
