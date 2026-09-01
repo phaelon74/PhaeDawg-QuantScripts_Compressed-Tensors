@@ -18,9 +18,17 @@ def nvtx_enabled() -> bool:
     }
 
 
+def _is_compiling() -> bool:
+    is_compiling = getattr(torch.compiler, "is_compiling", None)
+    return bool(is_compiling()) if callable(is_compiling) else False
+
+
 @contextmanager
 def nvtx_range(name: str) -> Iterator[None]:
-    if not nvtx_enabled() or not torch.cuda.is_available():
+    # range_push returns an int. Dynamo/AOT cannot put that in the FX graph,
+    # so NVTX must stay out of compiled apply() even when the env is on.
+    # Check compiling first so Dynamo dead-strips the push/pop branch.
+    if _is_compiling() or not nvtx_enabled() or not torch.cuda.is_available():
         yield
         return
     torch.cuda.nvtx.range_push(name)
