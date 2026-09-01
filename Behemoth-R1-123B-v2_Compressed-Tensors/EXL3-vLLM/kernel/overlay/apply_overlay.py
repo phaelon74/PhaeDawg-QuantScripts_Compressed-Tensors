@@ -281,17 +281,17 @@ K4_KERNEL_DQ_CALL_NEW = (
 )
 
 K4_SLIM_KERNEL_MARKER = f"{MARKER}: K4 narrow-16 occupancy layout"
-K4_SLIM_CONSTANTS_OLD = """    constexpr int WK = CFG == 0 ? 16 : 8;                 // k-split (warps per block)
-    constexpr int WNT = CFG == 0 ? 2 : 4;                // adjacent n-tiles per warp
-    constexpr int PF = CFG == 0 ? 4 : 2;                 // prefetch ring depth
-    constexpr int FOLD = CFG == 0 ? 4 : 2;               // fp16->fp32 fold cadence (divides PF)"""
-K4_SLIM_CONSTANTS_NEW = f"""    // {K4_SLIM_KERNEL_MARKER}. CFG 2 uses one n-tile per warp so
-    // six 256-thread blocks can reside per SM if ptxas stays at <= 42 regs.
-    constexpr int WK = CFG == 0 ? 16 : 8;
-    constexpr int WNT = CFG == 0 ? 2 : (CFG == 1 ? 4 : 1);
-    constexpr int PF = CFG == 1 ? 2 : 4;
-    constexpr int FOLD = CFG == 1 ? 2 : 4;
-    static_assert(CFG >= 0 && CFG <= 2);"""
+K4_SLIM_WK_OLD = "constexpr int WK = CFG == 0 ? 16 : 8;"
+K4_SLIM_WK_NEW = f"""// {K4_SLIM_KERNEL_MARKER}. CFG 2 uses one n-tile per warp.
+    constexpr int WK = CFG == 0 ? 16 : 8;"""
+K4_SLIM_WNT_OLD = "constexpr int WNT = CFG == 0 ? 2 : 4;"
+K4_SLIM_WNT_NEW = (
+    "constexpr int WNT = CFG == 0 ? 2 : (CFG == 1 ? 4 : 1);"
+)
+K4_SLIM_PF_OLD = "constexpr int PF = CFG == 0 ? 4 : 2;"
+K4_SLIM_PF_NEW = "constexpr int PF = CFG == 1 ? 2 : 4;"
+K4_SLIM_FOLD_OLD = "constexpr int FOLD = CFG == 0 ? 4 : 2;"
+K4_SLIM_FOLD_NEW = "constexpr int FOLD = CFG == 1 ? 2 : 4;"
 
 K56_KERNEL_MARKER = f"{MARKER}: K5/K6 lightweight staged GEMV"
 
@@ -760,8 +760,26 @@ def apply(src: Path) -> None:
     if K4_SLIM_KERNEL_MARKER not in kernel_text:
         kernel_text = _replace_once(
             kernel_text,
-            K4_SLIM_CONSTANTS_OLD,
-            K4_SLIM_CONSTANTS_NEW,
+            K4_SLIM_WK_OLD,
+            K4_SLIM_WK_NEW,
+            gemv_kernel,
+        )
+        kernel_text = _replace_once(
+            kernel_text,
+            K4_SLIM_WNT_OLD,
+            K4_SLIM_WNT_NEW,
+            gemv_kernel,
+        )
+        kernel_text = _replace_once(
+            kernel_text,
+            K4_SLIM_PF_OLD,
+            K4_SLIM_PF_NEW,
+            gemv_kernel,
+        )
+        kernel_text = _replace_once(
+            kernel_text,
+            K4_SLIM_FOLD_OLD,
+            K4_SLIM_FOLD_NEW,
             gemv_kernel,
         )
     gemv_kernel.write_text(kernel_text, encoding="utf-8")
