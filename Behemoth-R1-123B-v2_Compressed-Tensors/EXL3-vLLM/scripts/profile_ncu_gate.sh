@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ncu one M=1 projection kernel. Stop serve first. Physical GPU 1 only.
 #   export EXL3=...
-#   sudo -E bash "$EXL3/scripts/profile_ncu_gate.sh" OUT LEAF BITRATE [regular|staged|register]
+#   sudo -E bash "$EXL3/scripts/profile_ncu_gate.sh" OUT LEAF BITRATE [regular|staged|hybrid]
 set -euo pipefail
 EXL3="${EXL3:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 OUT="${1:-$EXL3/results/phase0/ncu_gate_m1}"
@@ -26,9 +26,9 @@ export VLLM_EXL3_NVTX=1
 case "$KERNEL" in
   regular) unset EXL3_GEMV_K56 ;;
   staged|k56) export EXL3_GEMV_K56=1 ;;
-  register) export EXL3_GEMV_K56=2 ;;
+  hybrid|register) export EXL3_GEMV_K56=2 ;;
   *)
-    echo "kernel must be regular, staged, or register; got: $KERNEL" >&2
+    echo "kernel must be regular, staged, or hybrid; got: $KERNEL" >&2
     exit 2
     ;;
 esac

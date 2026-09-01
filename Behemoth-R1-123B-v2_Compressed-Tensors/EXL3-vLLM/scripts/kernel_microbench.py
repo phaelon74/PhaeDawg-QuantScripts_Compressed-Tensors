@@ -138,7 +138,7 @@ def main() -> int:
         type=int,
         choices=(1, 2),
         default=0,
-        help="K5/K6 M=1 cb0 mode: 1=staged, 2=register extraction.",
+        help="K5/K6 M=1 cb0 mode: 1=staged, 2=hybrid extraction.",
     )
     parser.add_argument(
         "--m",

@@ -16,9 +16,9 @@ What the overlay changes:
 2. **Experimental K5/K6 GEMV** (`exl3_gemv_kernel.cuh`): M=1 cb0 fp16
    calls use a narrow 512-thread kernel when `EXL3_GEMV_K56` is nonzero.
    Mode 1 stages each coalesced 40/48-word tile in warp-private shared
-   memory. Mode 2 retains those coalesced loads but extracts both `dq4`
-   windows with warp shuffles, avoiding the staged path's bank-conflicted
-   shared reads. Both remain opt-in pending performance gates.
+   memory. Mode 2 uses conflict-free shared reads for words 0–31 and warp
+   shuffles for words 32–47, avoiding the staged path's bank conflicts
+   without paying for two shuffles per source. Both remain opt-in.
 3. **16-bit codebook LUT fill** (`exl3_decode_lut.cu`): 65536 fp16 entries
    per codebook in global memory. Compiled but not invoked yet: without
    `-rdc`, nvcc treats `extern __constant__` as a per-translation-unit
@@ -62,10 +62,10 @@ python scripts/kernel_microbench.py \
   --device 0 --bitrates 5,6 --m 1 \
   --shapes q_proj,k_proj,o_proj,gate_proj,down_proj \
   --gemv-k56 2 --warmup 10 --iters 50 \
-  --output results/k56_register_m1.json
+  --output results/k56_hybrid_m1.json
 
 sudo -E bash scripts/profile_ncu_gate.sh \
-  results/phase0/ncu_down_k5_register down_proj 5 register
+  results/phase0/ncu_down_k5_hybrid down_proj 5 hybrid
 ```
 
 Do not serve with `EXL3_GEMV_K56` enabled unless parity passes, ptxas reports no

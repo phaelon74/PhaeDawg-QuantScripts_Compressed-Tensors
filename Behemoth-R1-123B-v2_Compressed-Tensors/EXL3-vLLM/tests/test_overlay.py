@@ -29,6 +29,7 @@ def test_overlay_files_exist():
     assert "K5/K6 lightweight staged GEMV" in text
     assert "K5/K6 register extraction" in text
     assert "word < TWORDS" in text
+    assert "SMEM_STAGE || bits > 4" in text
     assert "dq_dispatch<bits, cb>(tp, lane << 3, f0, f1)" in text
     assert "dq4_regs_k56<bits, cb>" in text
     assert "Do not hook decode_3inst" in text

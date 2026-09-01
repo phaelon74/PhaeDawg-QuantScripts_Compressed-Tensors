@@ -60,7 +60,7 @@ GEMV_HELPER = (
 )
 
 GEMV_K56_HELPER = f"""
-// {MARKER}: K5/K6 M=1 prototype. 1=staged, 2=register extraction.
+// {MARKER}: K5/K6 M=1 prototype. 1=staged, 2=hybrid extraction.
 static int exl3_gemv_k56_mode()
 {{
     const char* env = std::getenv("EXL3_GEMV_K56");
@@ -110,7 +110,8 @@ K56_STAGE_ARRAY_OLD = (
 )
 K56_STAGE_ARRAY_NEW = (
     "[[maybe_unused]] __shared__ uint32_t "
-    "sh_stage[SMEM_STAGE ? WK : 1][SMEM_STAGE ? STAGE_WORDS : 1];"
+    "sh_stage[(SMEM_STAGE || bits > 4) ? WK : 1]"
+    "[(SMEM_STAGE || bits > 4) ? STAGE_WORDS : 1];"
 )
 
 K56_LOAD_OLD = """            if constexpr (bits == 3)
@@ -139,7 +140,8 @@ K56_STAGE_STORE_NEW = """                    if constexpr (bits == 5 || bits == 
                         int tile = l / WORD_GROUPS;
                         int segment = l % WORD_GROUPS;
                         int word = segment * 32 + lane;
-                        if (word < TWORDS)
+                        if (word < TWORDS &&
+                            (SMEM_STAGE || word < 32))
                             sh_stage[warp][tile * TWORDS + word] = bw[l];
                     }
                     else if (bits != 3 || lane < 24)
@@ -209,32 +211,27 @@ K56_REGISTER_PRECOMPUTE = f"""
 
 K56_REGISTER_DECODE = """                else if constexpr (bits == 5 || bits == 6)
                 {
-                    uint32_t lo = bw[t * WORD_GROUPS];
+                    const uint32_t* tp =
+                        &sh_stage[warp][t * TWORDS];
                     uint32_t hi = bw[t * WORD_GROUPS + 1];
 
-                    uint32_t av_lo = __shfl_sync(
-                        0xffffffffu, lo, x56_a0 & 31);
                     uint32_t av_hi = __shfl_sync(
                         0xffffffffu, hi, x56_a0 & 31);
-                    uint32_t bv_lo = __shfl_sync(
-                        0xffffffffu, lo, x56_b0 & 31);
                     uint32_t bv_hi = __shfl_sync(
                         0xffffffffu, hi, x56_b0 & 31);
-                    uint32_t av = x56_a0 < 32 ? av_lo : av_hi;
-                    uint32_t bv = x56_b0 < 32 ? bv_lo : bv_hi;
+                    uint32_t av =
+                        x56_a0 < 32 ? tp[x56_a0 & 31] : av_hi;
+                    uint32_t bv =
+                        x56_b0 < 32 ? tp[x56_b0 & 31] : bv_hi;
                     exl3_gemv_ns::dq4_regs_k56<bits, cb>(
                         av, bv, x56_s0, f0);
 
-                    av_lo = __shfl_sync(
-                        0xffffffffu, lo, x56_a1 & 31);
                     av_hi = __shfl_sync(
                         0xffffffffu, hi, x56_a1 & 31);
-                    bv_lo = __shfl_sync(
-                        0xffffffffu, lo, x56_b1 & 31);
                     bv_hi = __shfl_sync(
                         0xffffffffu, hi, x56_b1 & 31);
-                    av = x56_a1 < 32 ? av_lo : av_hi;
-                    bv = x56_b1 < 32 ? bv_lo : bv_hi;
+                    av = x56_a1 < 32 ? tp[x56_a1 & 31] : av_hi;
+                    bv = x56_b1 < 32 ? tp[x56_b1 & 31] : bv_hi;
                     exl3_gemv_ns::dq4_regs_k56<bits, cb>(
                         av, bv, x56_s1, f1);
                 }
@@ -425,6 +422,23 @@ def apply(src: Path) -> None:
             kernel_text,
             K56_DECODE_BRANCH_OLD,
             K56_DECODE_BRANCH_NEW,
+            gemv_kernel,
+        )
+    stage_guard = (
+        "            if constexpr (SMEM_STAGE)\n"
+        "            {\n"
+        "                __syncwarp();"
+    )
+    hybrid_stage_guard = (
+        "            if constexpr (SMEM_STAGE || bits > 4)\n"
+        "            {\n"
+        "                __syncwarp();"
+    )
+    if hybrid_stage_guard not in kernel_text:
+        kernel_text = _replace_once(
+            kernel_text,
+            stage_guard,
+            hybrid_stage_guard,
             gemv_kernel,
         )
     if K56_REGISTER_MARKER not in kernel_text:
