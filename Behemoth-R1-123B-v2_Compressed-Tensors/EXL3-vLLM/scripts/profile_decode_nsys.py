@@ -29,6 +29,16 @@ from vllm_exl3_sm86.constants import (  # noqa: E402
 from vllm_exl3_sm86.nvtx import nvtx_range  # noqa: E402
 from vllm_exl3_sm86.ops import call_exl3_gemm  # noqa: E402
 
+DECODER_LEAVES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+
 
 def _payload(device, k: int, n: int, bitrate: int, m: int):
     trellis = torch.zeros((k // 16, n // 16, 16 * bitrate), dtype=torch.int16, device=device)
@@ -45,6 +55,12 @@ def main() -> int:
     parser.add_argument("--m", type=int, default=1)
     parser.add_argument("--bitrate", type=int, default=4)
     parser.add_argument("--codebook", choices=("3inst", "mul1"), default="3inst")
+    parser.add_argument(
+        "--leaf",
+        choices=("all", *DECODER_LEAVES, "lm_head"),
+        default="all",
+        help="Projection to repeat. Default profiles a complete uniform-K token.",
+    )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     args = parser.parse_args()
@@ -62,24 +78,19 @@ def main() -> int:
         bitrate = HEAD_BITRATE if name == "lm_head" else args.bitrate
         payloads[name] = _payload(device, k, n, bitrate, args.m)
 
+    selected_leaves = DECODER_LEAVES if args.leaf == "all" else (args.leaf,)
+
     def one_token():
         with nvtx_range("exl3.decode_token"):
             for _ in range(args.layers):
-                for name in (
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",
-                    "gate_proj",
-                    "up_proj",
-                    "down_proj",
-                ):
+                for name in selected_leaves:
                     x, trellis, suh, svh = payloads[name]
                     with nvtx_range(f"exl3.{name}"):
                         call_exl3_gemm(x, trellis, suh, svh, mcg, mul1)
-            x, trellis, suh, svh = payloads["lm_head"]
-            with nvtx_range("exl3.lm_head"):
-                call_exl3_gemm(x, trellis, suh, svh, mcg, mul1)
+            if args.leaf == "all":
+                x, trellis, suh, svh = payloads["lm_head"]
+                with nvtx_range("exl3.lm_head"):
+                    call_exl3_gemm(x, trellis, suh, svh, mcg, mul1)
 
     for _ in range(args.warmup):
         one_token()
@@ -93,8 +104,9 @@ def main() -> int:
     samples.sort()
     median = samples[len(samples) // 2]
     print(
-        f"codebook={args.codebook} bitrate={args.bitrate} layers={args.layers} "
-        f"M={args.m} median_ms={median:.3f} tok_s={1000.0 / median:.2f}"
+        f"codebook={args.codebook} bitrate={args.bitrate} leaf={args.leaf} "
+        f"layers={args.layers} M={args.m} median_ms={median:.3f} "
+        f"tok_s={1000.0 / median:.2f}"
     )
     return 0
 

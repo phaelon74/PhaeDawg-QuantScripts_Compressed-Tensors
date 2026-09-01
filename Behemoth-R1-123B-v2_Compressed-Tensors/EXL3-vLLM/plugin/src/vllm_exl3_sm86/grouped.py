@@ -22,13 +22,25 @@ _ENABLED_KV_LAYERS = 0
 _WARMUP_FAILED = False
 
 
-def mgemm_disabled() -> bool:
-    return os.environ.get("VLLM_EXL3_DISABLE_MGEMM", "").strip().lower() in {
+def _env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
+
+
+def mgemm_disabled() -> bool:
+    return _env_enabled("VLLM_EXL3_DISABLE_MGEMM")
+
+
+def pair_mgemm_disabled() -> bool:
+    return mgemm_disabled() or _env_enabled("VLLM_EXL3_DISABLE_PAIR_MGEMM")
+
+
+def kv_mgemm_disabled() -> bool:
+    return mgemm_disabled() or _env_enabled("VLLM_EXL3_DISABLE_KV_MGEMM")
 
 
 def matching_pair_shards(layer: torch.nn.Module) -> list[ShardId] | None:
@@ -113,8 +125,12 @@ def enable_mgemm_if_eligible(layer: torch.nn.Module) -> bool:
     if not ext_has_mgemm():
         return False
 
-    pair = matching_pair_shards(layer)
-    kv_pair = None if pair is not None else matching_kv_shards(layer)
+    pair = None if pair_mgemm_disabled() else matching_pair_shards(layer)
+    kv_pair = (
+        None
+        if pair is not None or kv_mgemm_disabled()
+        else matching_kv_shards(layer)
+    )
     if pair is None and kv_pair is None:
         return False
     fused = pair if pair is not None else kv_pair

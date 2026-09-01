@@ -5,10 +5,12 @@ from types import SimpleNamespace
 import torch
 
 from vllm_exl3_sm86.grouped import (
+    kv_mgemm_disabled,
     matching_kv_shards,
     matching_pair_shards,
     matching_qkv_shards,
     mgemm_disabled,
+    pair_mgemm_disabled,
 )
 from vllm_exl3_sm86.ops import register_custom_op
 
@@ -129,6 +131,23 @@ def test_mgemm_disable_env(monkeypatch):
     assert mgemm_disabled() is False
     monkeypatch.setenv("VLLM_EXL3_DISABLE_MGEMM", "1")
     assert mgemm_disabled() is True
+
+
+def test_split_mgemm_disable_env(monkeypatch):
+    monkeypatch.delenv("VLLM_EXL3_DISABLE_MGEMM", raising=False)
+    monkeypatch.delenv("VLLM_EXL3_DISABLE_PAIR_MGEMM", raising=False)
+    monkeypatch.delenv("VLLM_EXL3_DISABLE_KV_MGEMM", raising=False)
+    assert pair_mgemm_disabled() is False
+    assert kv_mgemm_disabled() is False
+
+    monkeypatch.setenv("VLLM_EXL3_DISABLE_PAIR_MGEMM", "1")
+    assert pair_mgemm_disabled() is True
+    assert kv_mgemm_disabled() is False
+
+    monkeypatch.delenv("VLLM_EXL3_DISABLE_PAIR_MGEMM")
+    monkeypatch.setenv("VLLM_EXL3_DISABLE_KV_MGEMM", "1")
+    assert pair_mgemm_disabled() is False
+    assert kv_mgemm_disabled() is True
 
 
 def test_custom_op_registers_mgemm_out():
