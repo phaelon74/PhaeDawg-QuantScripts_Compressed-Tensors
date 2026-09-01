@@ -38,6 +38,12 @@ def main() -> int:
         default=str(ROOT / "results" / "decode_latency_budget.json"),
     )
     parser.add_argument("--target-tok-s", type=float, default=28.0)
+    parser.add_argument(
+        "--serving-tok-s",
+        type=float,
+        default=0.0,
+        help="Measured serving decode rate for non-GEMM budget accounting.",
+    )
     args = parser.parse_args()
     rows = []
     codebook = None
@@ -81,6 +87,9 @@ def main() -> int:
     plugin_ms += head_plugin
     native_ms += head_native
     target_ms = 1000.0 / args.target_tok_s
+    serving_ms = (
+        1000.0 / args.serving_tok_s if args.serving_tok_s > 0 else None
+    )
     report = {
         "checkpoint": inventory.get("checkpoint"),
         "codebook": codebook,
@@ -95,9 +104,11 @@ def main() -> int:
         "target_tok_s": args.target_tok_s,
         "target_ms_per_token": target_ms,
         "plugin_gap_ms": plugin_ms - target_ms,
-        "measured_serving_decode_tok_s": 18.9,
-        "measured_serving_ms": 1000.0 / 18.9,
-        "non_gemm_ms_if_plugin_budget": (1000.0 / 18.9) - plugin_ms,
+        "measured_serving_decode_tok_s": args.serving_tok_s or None,
+        "measured_serving_ms": serving_ms,
+        "non_gemm_ms_if_plugin_budget": (
+            serving_ms - plugin_ms if serving_ms is not None else None
+        ),
         "rows": used,
         "missing": missing,
     }
