@@ -90,60 +90,9 @@ if [[ "${SKIP_NSYS:-0}" == "1" ]]; then
   exit 0
 fi
 
-echo "=== 6. nsys attach to live TP4 serve ==="
-if ! command -v nsys >/dev/null 2>&1; then
-  echo "nsys not on PATH. After a capture, run:"
-  echo "  nsys stats --report cuda_gpu_kern_sum --format csv -o $OUT/kern_sum <rep>"
-  echo "  python $EXL3/scripts/summarize_nsys.py $OUT/kern_sum.csv --decode-tokens $DECODE_TOKENS --output $OUT/serving_attribution.json"
-  exit 0
-fi
-
-PARENT_PID="${VLLM_PID:-}"
-if [[ -z "$PARENT_PID" ]]; then
-  PARENT_PID="$(pgrep -f 'vllm.entrypoints.openai.api_server|VLLM::EngineCore' | head -n 1 || true)"
-fi
-if [[ -z "$PARENT_PID" ]]; then
-  echo "No vLLM PID. Start serve with VLLM_EXL3_NVTX=1, then rerun:"
-  echo "  SKIP_GPU=1 VLLM_PID=<pid> bash $EXL3/scripts/host_phase05.sh"
-  echo "Or profile the launcher:"
-  echo "  VLLM_EXL3_NVTX=1 nsys profile -t cuda,nvtx,nccl --duration=25 -o $OUT/nsys_serve_decode --target-processes=all bash $LAUNCH \"\$VLLM_API_KEY\""
-  exit 0
-fi
-
-echo "attaching nsys to pid $PARENT_PID for 20s; sending a short decode..."
-nsys profile \
-  --duration=20 \
-  --delay=2 \
-  --trace=cuda,nvtx,nccl \
-  --gpu-metrics-device=none \
-  --force-overwrite=true \
-  --target-processes=all \
-  -p "$PARENT_PID" \
-  -o "$OUT/nsys_serve_decode" &
-NSYS_PID=$!
-sleep 4
-if [[ -n "${VLLM_API_KEY:-}" ]]; then
-  python "$EXL3/scripts/bench_serving_contexts.py" \
-    --host "$HOST" --port "$PORT" --api-key "$VLLM_API_KEY" \
-    --model "$MODEL" \
-    --contexts 512 --output-tokens "$DECODE_TOKENS" --runs 1 \
-    --warmup-runs 0 --prompt-style english \
-    --output "$OUT/nsys_probe_bench.json" || true
-else
-  echo "VLLM_API_KEY unset: generate tokens from another shell during the 20s window."
-fi
-wait "$NSYS_PID" || true
-
-if [[ -f "$OUT/nsys_serve_decode.nsys-rep" ]]; then
-  nsys stats --report cuda_gpu_kern_sum --format csv \
-    -o "$OUT/kern_sum" "$OUT/nsys_serve_decode.nsys-rep" || true
-  CSV="$(ls -1 "$OUT"/kern_sum*.csv 2>/dev/null | head -n 1 || true)"
-  if [[ -n "${CSV:-}" ]]; then
-    python "$EXL3/scripts/summarize_nsys.py" "$CSV" \
-      --decode-tokens "$DECODE_TOKENS" \
-      --output "$OUT/serving_attribution.json"
-  fi
-fi
-
-echo "Phase 0.5 receipts under $OUT"
-echo "Paste mgemm_abi.json, decode_latency_budget.json, native mgemm JSON, and serving_attribution.json."
+echo "=== 6. nsys serving capture ==="
+echo "x86 nsys cannot attach to a running vLLM (-p PID / --target-processes=all)."
+echo "CUDA traces require nsys to launch the process. After native mgemm, restart serve with:"
+echo "  bash $EXL3/scripts/host_phase05_nsys.sh"
+echo "Phase 0.5 kernel receipts under $OUT"
+echo "Paste mgemm_abi.json, decode_latency_budget.json, native mgemm JSON, then the nsys JSON."
