@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""M=1/2/4 gate+up: two exl3_gemm vs one exl3_mgemm (ArtusDev 4.25 3inst K=4).
+"""Compare N separate exl3_gemm launches vs one exl3_mgemm.
+
+Equal-N pairs (gate/up, k/v) use true widths. Unequal-N groups (q/k/v) pad
+the mgemm trellis and C to max(N) because the current plugin ABI has no
+size_n_list. That padded path is the cost of fusing without per-matrix
+widths, not a serving-ready kernel.
 
 Run on a free GPU after stopping TP4 serve. Physical 0 and 5 stay reserved:
-  CUDA_VISIBLE_DEVICES=1 python "$EXL3/scripts/mgemm_microbench.py"
+  CUDA_VISIBLE_DEVICES=1 python "$EXL3/scripts/mgemm_microbench.py" --shapes kv
 """
 
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import statistics
 import sys
@@ -22,15 +28,31 @@ from vllm_exl3_sm86.constants import (  # noqa: E402
     BEHEMOTH_TP4_SHAPES,
     GRAPH_CAPTURE_SIZES,
 )
-from vllm_exl3_sm86.ops import (  # noqa: E402
-    _load_exl3_ext,
-    call_exl3_gemm,
-    call_exl3_mgemm,
-    ext_has_mgemm,
-)
 
-K, N = BEHEMOTH_TP4_SHAPES["gate_proj"]
-BITRATE = 4
+SHAPE_ALIASES = {
+    "gate_up": ("gate_proj", "up_proj"),
+    "kv": ("k_proj", "v_proj"),
+    "qkv": ("q_proj", "k_proj", "v_proj"),
+}
+
+
+def resolve_shapes(spec: str) -> tuple[str, ...]:
+    key = spec.strip()
+    if key in SHAPE_ALIASES:
+        return SHAPE_ALIASES[key]
+    names = tuple(part.strip() for part in key.split(",") if part.strip())
+    if len(names) < 2:
+        raise ValueError(
+            "need at least two shapes or an alias (gate_up, kv, qkv); "
+            f"got {spec!r}"
+        )
+    unknown = [name for name in names if name not in BEHEMOTH_TP4_SHAPES]
+    if unknown:
+        raise ValueError(f"unknown shapes: {unknown}")
+    ks = {BEHEMOTH_TP4_SHAPES[name][0] for name in names}
+    if len(ks) != 1:
+        raise ValueError(f"grouped shapes must share K; got {ks} for {names}")
+    return names
 
 
 def _sync():
@@ -52,17 +74,78 @@ def _time_ms(fn, warmup: int, iters: int) -> float:
     return statistics.median(samples)
 
 
+def _mgemm_signature() -> dict[str, object]:
+    from vllm_exl3_sm86.ops import _load_exl3_ext
+
+    ext = _load_exl3_ext()
+    fn = getattr(ext, "exl3_mgemm", None)
+    if fn is None:
+        return {"present": False}
+    try:
+        params = list(inspect.signature(fn).parameters)
+    except (TypeError, ValueError):
+        params = []
+    blob = " ".join(
+        [
+            " ".join(params),
+            str(getattr(fn, "__doc__", "") or ""),
+            str(getattr(fn, "__text_signature__", "") or ""),
+        ]
+    )
+    return {
+        "present": True,
+        "param_names": params,
+        "param_count": len(params),
+        "has_size_n_list": "size_n_list" in blob,
+        "has_c_ptrs": "c_ptrs" in blob,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument(
+        "--shapes",
+        default="gate_up",
+        help="Alias gate_up/kv/qkv or comma list sharing K, e.g. k_proj,v_proj.",
+    )
+    parser.add_argument("--bitrate", type=int, default=4)
+    parser.add_argument(
+        "--m",
+        default="",
+        help="Comma list of M. Default is GRAPH_CAPTURE_SIZES.",
+    )
+    parser.add_argument(
         "--output",
-        default=str(ROOT / "results" / "mgemm_vs_gemm_gateup.json"),
+        default="",
+        help="JSON path. Default results/mgemm_vs_gemm_<shapes>.json",
     )
     args = parser.parse_args()
+    names = resolve_shapes(args.shapes)
+    k = BEHEMOTH_TP4_SHAPES[names[0]][0]
+    widths = [BEHEMOTH_TP4_SHAPES[name][1] for name in names]
+    padded = len(set(widths)) != 1
+    max_n = max(widths)
+    group = len(names)
+    ms = (
+        tuple(int(part) for part in args.m.split(",") if part.strip())
+        if args.m.strip()
+        else GRAPH_CAPTURE_SIZES
+    )
+    out_path = Path(
+        args.output
+        or (ROOT / "results" / f"mgemm_vs_gemm_{'_'.join(names)}.json")
+    )
     import torch
+
+    from vllm_exl3_sm86.ops import (
+        _load_exl3_ext,
+        call_exl3_gemm,
+        call_exl3_mgemm,
+        ext_has_mgemm,
+    )
 
     if not torch.cuda.is_available():
         print("CUDA required", file=sys.stderr)
@@ -73,80 +156,136 @@ def main() -> int:
     torch.cuda.set_device(args.device)
     device = torch.device("cuda", args.device)
     _load_exl3_ext()
+    mgemm_sig = _mgemm_signature()
+    print(
+        f"shapes={list(names)} K={k} Ns={widths} padded={int(padded)} "
+        f"bitrate={args.bitrate} 3inst device={args.device} "
+        f"size_n_list={mgemm_sig.get('has_size_n_list')}"
+    )
     rows = []
-    print(f"gate_up K={K} N={N} bitrate={BITRATE} 3inst device={args.device}")
-    for m in GRAPH_CAPTURE_SIZES:
-        x = torch.randn(m, K, dtype=torch.float16, device=device)
-        t0 = torch.randint(
-            -1024, 1024, (K // 16, N // 16, 16 * BITRATE), dtype=torch.int16, device=device
+    for m in ms:
+        x = torch.randn(m, k, dtype=torch.float16, device=device)
+        true_trellis = []
+        suh = []
+        svh = []
+        outs = []
+        xhads = []
+        for n in widths:
+            true_trellis.append(
+                torch.randint(
+                    -1024,
+                    1024,
+                    (k // 16, n // 16, 16 * args.bitrate),
+                    dtype=torch.int16,
+                    device=device,
+                )
+            )
+            suh.append(torch.randn(k, dtype=torch.float16, device=device))
+            svh.append(torch.randn(n, dtype=torch.float16, device=device))
+            outs.append(torch.empty((m, n), dtype=torch.float16, device=device))
+            xhads.append(torch.empty((m, k), dtype=torch.float16, device=device))
+        if padded:
+            mgemm_trellis = [
+                torch.randint(
+                    -1024,
+                    1024,
+                    (k // 16, max_n // 16, 16 * args.bitrate),
+                    dtype=torch.int16,
+                    device=device,
+                )
+                for _ in names
+            ]
+            mgemm_svh = [
+                torch.randn(max_n, dtype=torch.float16, device=device)
+                for _ in names
+            ]
+        else:
+            mgemm_trellis = true_trellis
+            mgemm_svh = svh
+        gout = torch.empty(
+            (group, m, max_n), dtype=torch.float16, device=device
         )
-        t1 = torch.randint(
-            -1024, 1024, (K // 16, N // 16, 16 * BITRATE), dtype=torch.int16, device=device
-        )
-        suh0 = torch.randn(K, dtype=torch.float16, device=device)
-        suh1 = torch.randn(K, dtype=torch.float16, device=device)
-        svh0 = torch.randn(N, dtype=torch.float16, device=device)
-        svh1 = torch.randn(N, dtype=torch.float16, device=device)
-        out0 = torch.empty((m, N), dtype=torch.float16, device=device)
-        out1 = torch.empty((m, N), dtype=torch.float16, device=device)
-        xhad0 = torch.empty((m, K), dtype=torch.float16, device=device)
-        xhad1 = torch.empty((m, K), dtype=torch.float16, device=device)
-        gout = torch.empty((2, m, N), dtype=torch.float16, device=device)
-        gxhad = torch.empty((2, m, K), dtype=torch.float16, device=device)
+        gxhad = torch.empty((group, m, k), dtype=torch.float16, device=device)
         ptrs_t = torch.tensor(
-            [int(t0.data_ptr()), int(t1.data_ptr())], dtype=torch.int64, device=device
+            [int(t.data_ptr()) for t in mgemm_trellis],
+            dtype=torch.int64,
+            device=device,
         )
         ptrs_suh = torch.tensor(
-            [int(suh0.data_ptr()), int(suh1.data_ptr())],
+            [int(s.data_ptr()) for s in suh],
             dtype=torch.int64,
             device=device,
         )
         ptrs_svh = torch.tensor(
-            [int(svh0.data_ptr()), int(svh1.data_ptr())],
+            [int(s.data_ptr()) for s in mgemm_svh],
             dtype=torch.int64,
             device=device,
         )
 
-        def two_gemms():
-            call_exl3_gemm(x, t0, suh0, svh0, False, False, out=out0, x_had=xhad0)
-            call_exl3_gemm(x, t1, suh1, svh1, False, False, out=out1, x_had=xhad1)
+        def many_gemms(
+            trellis=true_trellis,
+            suh_list=suh,
+            svh_list=svh,
+            out_list=outs,
+            xhad_list=xhads,
+        ):
+            for trellis_i, suh_i, svh_i, out_i, xhad_i in zip(
+                trellis, suh_list, svh_list, out_list, xhad_list
+            ):
+                call_exl3_gemm(
+                    x, trellis_i, suh_i, svh_i, False, False,
+                    out=out_i, x_had=xhad_i,
+                )
 
         def one_mgemm():
             call_exl3_mgemm(
-                x.view(1, m, K),
+                x.view(1, m, k),
                 ptrs_t,
                 ptrs_suh,
                 ptrs_svh,
-                BITRATE,
+                args.bitrate,
                 False,
                 False,
                 gout,
                 gxhad,
             )
 
-        two_gemms()
+        many_gemms()
         one_mgemm()
         _sync()
-        t_gemm = _time_ms(two_gemms, args.warmup, args.iters)
+        t_gemm = _time_ms(many_gemms, args.warmup, args.iters)
         t_mgemm = _time_ms(one_mgemm, args.warmup, args.iters)
         layer_ms = {
             "m": m,
-            "two_gemm_ms": t_gemm,
+            "n_gemm_ms": t_gemm,
             "mgemm_ms": t_mgemm,
+            "two_gemm_ms": t_gemm,
             "speedup": t_gemm / t_mgemm if t_mgemm else None,
-            "two_gemm_88_ms": t_gemm * BEHEMOTH_LAYERS,
+            "n_gemm_88_ms": t_gemm * BEHEMOTH_LAYERS,
             "mgemm_88_ms": t_mgemm * BEHEMOTH_LAYERS,
+            "two_gemm_88_ms": t_gemm * BEHEMOTH_LAYERS,
         }
         rows.append(layer_ms)
         print(
-            f"M={m}  two_gemm={t_gemm:.3f}ms  mgemm={t_mgemm:.3f}ms  "
+            f"M={m}  {group}_gemm={t_gemm:.3f}ms  mgemm={t_mgemm:.3f}ms  "
             f"speedup={layer_ms['speedup']:.3f}x  "
-            f"88x two={layer_ms['two_gemm_88_ms']:.1f}ms  "
+            f"88x gemm={layer_ms['n_gemm_88_ms']:.1f}ms  "
             f"88x mgemm={layer_ms['mgemm_88_ms']:.1f}ms"
         )
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.output).write_text(json.dumps({"rows": rows}, indent=2) + "\n")
-    print(f"Wrote {args.output}")
+    payload = {
+        "shapes": list(names),
+        "k": k,
+        "widths": widths,
+        "padded_to_max_n": padded,
+        "max_n": max_n,
+        "bitrate": args.bitrate,
+        "codebook": "3inst",
+        "mgemm_signature": mgemm_sig,
+        "rows": rows,
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"Wrote {out_path}")
     return 0
 
 
