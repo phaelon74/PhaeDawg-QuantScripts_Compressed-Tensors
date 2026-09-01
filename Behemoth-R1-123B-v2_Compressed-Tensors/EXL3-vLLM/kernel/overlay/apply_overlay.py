@@ -78,6 +78,15 @@ static int exl3_gemv_k4_arith_mode()
 }}
 """
 
+GEMV_K4_SLIM_HELPER = f"""
+// {MARKER}: K4 M=1 narrow-16 occupancy prototype.
+static bool exl3_gemv_k4_slim_enabled()
+{{
+    const char* env = std::getenv("EXL3_GEMV_K4_SLIM");
+    return env && atoi(env) > 0;
+}}
+"""
+
 GEMV_SM86_K4_POLICY = f"""
     // {MARKER}: measured RTX 3090 M=1 policy for Behemoth TP4 shapes.
     // Narrow GEMV wins for the large output projections; the regular kernel
@@ -103,6 +112,11 @@ static void* exl3_gemv_select_k4_arith(int mode)
         return (void*) exl3_gemv_kernel<4, false, 0, 0, 0, false, 2>;
     return nullptr;
 }}
+
+static void* exl3_gemv_select_k4_slim()
+{{
+    return (void*) exl3_gemv_kernel<4, false, 0, 0, 2, false>;
+}}
 """
 
 GEMV_K4_ARITH_SELECT_OLD = (
@@ -112,10 +126,28 @@ GEMV_K4_ARITH_SELECT_OLD = (
 GEMV_K4_ARITH_SELECT_NEW = f"""void* narrow_kernel =
         exl3_gemv_select_kernel(K, cb, c_fp32, mmode, 0, smem);
     // {MARKER}: only alter the exact serving hotspot under explicit opt-in.
+    bool k4_slim = K == 4 && cb == 0 && !c_fp32 && mmode == 0 &&
+                   !smem && exl3_gemv_k4_slim_enabled();
     int k4_arith_mode = exl3_gemv_k4_arith_mode();
-    if (K == 4 && cb == 0 && !c_fp32 && mmode == 0 &&
-        !smem && k4_arith_mode)
+    if (k4_slim)
+        narrow_kernel = exl3_gemv_select_k4_slim();
+    else if (K == 4 && cb == 0 && !c_fp32 && mmode == 0 &&
+             !smem && k4_arith_mode)
         narrow_kernel = exl3_gemv_select_k4_arith(k4_arith_mode);"""
+
+GEMV_K4_RESOURCES_OLD = (
+    "int narrow_coresident = occupancy(narrow_kernel, 512) * num_sms;"
+)
+GEMV_K4_RESOURCES_NEW = f"""// {MARKER}: slim uses 256 threads and 16 columns.
+    int narrow_block_dim = k4_slim ? 256 : 512;
+    int narrow_cols = k4_slim ? 16 : 32;
+    int narrow_coresident =
+        occupancy(narrow_kernel, narrow_block_dim) * num_sms;"""
+GEMV_K4_LAUNCH_OLD = """int block_dim = cfg == 0 ? 512 : 256;
+    int cols = cfg == 0 ? 32 : 64;"""
+GEMV_K4_LAUNCH_NEW = """int block_dim =
+        cfg == 0 ? narrow_block_dim : 256;
+    int cols = cfg == 0 ? narrow_cols : 64;"""
 
 K4_ARITH_KERNEL_MARKER = f"{MARKER}: K4 cb0 batched arithmetic"
 K4_ARITH_KERNEL_HELPERS = f"""
@@ -247,6 +279,19 @@ K4_KERNEL_DQ_CALL_OLD = (
 K4_KERNEL_DQ_CALL_NEW = (
     "exl3_gemv_ns::dq8_regs_4bits<cb, K4_ARITH_MODE>("
 )
+
+K4_SLIM_KERNEL_MARKER = f"{MARKER}: K4 narrow-16 occupancy layout"
+K4_SLIM_CONSTANTS_OLD = """    constexpr int WK = CFG == 0 ? 16 : 8;                 // k-split (warps per block)
+    constexpr int WNT = CFG == 0 ? 2 : 4;                // adjacent n-tiles per warp
+    constexpr int PF = CFG == 0 ? 4 : 2;                 // prefetch ring depth
+    constexpr int FOLD = CFG == 0 ? 4 : 2;               // fp16->fp32 fold cadence (divides PF)"""
+K4_SLIM_CONSTANTS_NEW = f"""    // {K4_SLIM_KERNEL_MARKER}. CFG 2 uses one n-tile per warp so
+    // six 256-thread blocks can reside per SM if ptxas stays at <= 42 regs.
+    constexpr int WK = CFG == 0 ? 16 : 8;
+    constexpr int WNT = CFG == 0 ? 2 : (CFG == 1 ? 4 : 1);
+    constexpr int PF = CFG == 1 ? 2 : 4;
+    constexpr int FOLD = CFG == 1 ? 2 : 4;
+    static_assert(CFG >= 0 && CFG <= 2);"""
 
 K56_KERNEL_MARKER = f"{MARKER}: K5/K6 lightweight staged GEMV"
 
@@ -460,6 +505,13 @@ def apply(src: Path) -> None:
         text = text.replace(
             needle, GEMV_K4_ARITH_HELPER + "\n" + needle, 1
         )
+    if "exl3_gemv_k4_slim_enabled" not in text:
+        needle = "static int exl3_gemv_env_mode()"
+        if needle not in text:
+            raise SystemExit(f"{gemv}: missing exl3_gemv_env_mode")
+        text = text.replace(
+            needle, GEMV_K4_SLIM_HELPER + "\n" + needle, 1
+        )
     text = text.replace(
         "!exl3_gemv_allow_k56()", "exl3_gemv_k56_mode() == 0"
     )
@@ -581,6 +633,19 @@ def apply(src: Path) -> None:
             GEMV_K4_ARITH_SELECT_NEW,
             gemv,
         )
+    if "slim uses 256 threads and 16 columns" not in text:
+        text = _replace_once(
+            text,
+            GEMV_K4_RESOURCES_OLD,
+            GEMV_K4_RESOURCES_NEW,
+            gemv,
+        )
+        text = _replace_once(
+            text,
+            GEMV_K4_LAUNCH_OLD,
+            GEMV_K4_LAUNCH_NEW,
+            gemv,
+        )
     gemv.write_text(text, encoding="utf-8")
 
     gemv_kernel = quant / "exl3_gemv_kernel.cuh"
@@ -691,6 +756,13 @@ def apply(src: Path) -> None:
             raise SystemExit(f"{gemv_kernel}: K5/K6 assertion not found")
         kernel_text = kernel_text.replace(
             needle, needle + K4_KERNEL_ASSERT, 1
+        )
+    if K4_SLIM_KERNEL_MARKER not in kernel_text:
+        kernel_text = _replace_once(
+            kernel_text,
+            K4_SLIM_CONSTANTS_OLD,
+            K4_SLIM_CONSTANTS_NEW,
+            gemv_kernel,
         )
     gemv_kernel.write_text(kernel_text, encoding="utf-8")
 

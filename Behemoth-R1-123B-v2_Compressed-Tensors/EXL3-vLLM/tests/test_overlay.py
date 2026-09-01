@@ -37,6 +37,10 @@ def test_overlay_files_exist():
     assert "decode_pair_cb0_mad_" in text
     assert "decode8_cb0_batched_" in text
     assert "K4_ARITH_MODE = 0" in text
+    assert "EXL3_GEMV_K4_SLIM" in text
+    assert "exl3_gemv_select_k4_slim" in text
+    assert "K4 narrow-16 occupancy layout" in text
+    assert "narrow_cols = k4_slim ? 16 : 32" in text
     assert "Do not hook decode_3inst" in text
     assert "exl3_lut_decode<cb>(x)" in text  # leftover-hook stripper only
 

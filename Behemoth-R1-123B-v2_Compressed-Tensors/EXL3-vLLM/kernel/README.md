@@ -23,13 +23,17 @@ What the overlay changes:
    forces one `mad.lo.u32` per code, while mode 2 batches eight independent
    MAD/LOP3 chains to expose more instruction-level parallelism. Set
    `EXL3_GEMV_K4_ARITH=1` or `2`; mode 0 retains the current kernel.
-4. **16-bit codebook LUT fill** (`exl3_decode_lut.cu`): 65536 fp16 entries
+4. **Experimental K4 slim layout**: `EXL3_GEMV_K4_SLIM=1` selects a
+   256-thread, 16-column, eight-way K-split kernel for M=1 cb0 FP16. Its
+   smaller per-warp state may permit more resident blocks and improve
+   memory-level parallelism. Default dispatch remains unchanged.
+5. **16-bit codebook LUT fill** (`exl3_decode_lut.cu`): 65536 fp16 entries
    per codebook in global memory. Compiled but not invoked yet: without
    `-rdc`, nvcc treats `extern __constant__` as a per-translation-unit
    static (warning 20044), so a flag set in the fill TU never reaches GEMM
    kernels. Arithmetic `decode_3inst` stays live. `EXL3_GEMV_LUT=0` is
    reserved for when the LUT is wired as a GEMV kernel argument.
-5. **INT8-activation GEMV on 3inst** (`exl3_gemm.cu`): `EXL3_INT8_GEMV_CB=1`
+6. **INT8-activation GEMV on 3inst** (`exl3_gemm.cu`): `EXL3_INT8_GEMV_CB=1`
    also tries `exl3_gemv_int8` for cb=0. Default off. KLD-gate before serving.
 
 Markers: `Phaedawg-SM86-overlay`. Re-running the applier is idempotent.
@@ -58,6 +62,15 @@ for mode in 0 1 2; do
     --warmup 10 --iters 100 \
     --output "results/k4_arith_mode${mode}_m1.json"
 done
+
+EXL3_GEMV_K4_SLIM=1 python -m pytest tests/test_cuda_parity.py \
+  -k 'k4_slim_gemv' -q
+
+EXL3_GEMV_K4_SLIM=1 python scripts/kernel_microbench.py \
+  --device 0 --bitrates 4 --m 1 \
+  --shapes o_proj,gate_proj,up_proj,down_proj \
+  --warmup 10 --iters 100 \
+  --output results/k4_slim_m1.json
 ```
 
 K5/K6 acceptance sequence on one RTX 3090:
