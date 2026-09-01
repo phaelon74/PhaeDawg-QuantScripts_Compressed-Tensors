@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Compare N separate exl3_gemm launches vs one exl3_mgemm.
+"""Compare N separate native exl3_gemm launches vs one native exl3_mgemm.
 
-Equal-N pairs (gate/up, k/v) use true widths. Unequal-N groups (q/k/v) pad
-the mgemm trellis and C to max(N) because the current plugin ABI has no
-size_n_list. That padded path is the cost of fusing without per-matrix
-widths, not a serving-ready kernel.
+Default path is ext.exl3_gemm / ext.exl3_mgemm (same as kernel_microbench).
+--path wrapper routes through the vLLM custom op and measures dispatch tax.
+
+Equal-N pairs (gate/up, k/v) use true widths. Unequal-N groups (q/k/v) pass
+size_n_list + c_ptrs when the pin exposes them; --pad-unequal is the old
+padded-to-max-N path and is not a serving-ready kernel.
 
 Run on a free GPU after stopping TP4 serve. Physical 0 and 5 stay reserved:
   CUDA_VISIBLE_DEVICES=1 python "$EXL3/scripts/mgemm_microbench.py" --shapes kv
@@ -13,7 +15,6 @@ Run on a free GPU after stopping TP4 serve. Physical 0 and 5 stay reserved:
 from __future__ import annotations
 
 import argparse
-import inspect
 import json
 import statistics
 import sys
@@ -21,8 +22,10 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "plugin" / "src"))
 
+from mgemm_abi import describe_abi  # noqa: E402
 from vllm_exl3_sm86.constants import (  # noqa: E402
     BEHEMOTH_LAYERS,
     BEHEMOTH_TP4_SHAPES,
@@ -75,30 +78,45 @@ def _time_ms(fn, warmup: int, iters: int) -> float:
 
 
 def _mgemm_signature() -> dict[str, object]:
-    from vllm_exl3_sm86.ops import _load_exl3_ext
+    return describe_abi()
 
-    ext = _load_exl3_ext()
-    fn = getattr(ext, "exl3_mgemm", None)
-    if fn is None:
-        return {"present": False}
-    try:
-        params = list(inspect.signature(fn).parameters)
-    except (TypeError, ValueError):
-        params = []
-    blob = " ".join(
-        [
-            " ".join(params),
-            str(getattr(fn, "__doc__", "") or ""),
-            str(getattr(fn, "__text_signature__", "") or ""),
-        ]
+
+def _native_gemm(ext, x, trellis, suh, svh, out, x_had):
+    ext.exl3_gemm(x, trellis, out, suh, x_had, svh, -1, False, False, 0)
+
+
+def _native_mgemm(
+    ext,
+    x,
+    ptrs_t,
+    gout,
+    ptrs_suh,
+    gxhad,
+    ptrs_svh,
+    bitrate: int,
+    size_n_list=None,
+    c_ptrs=None,
+):
+    ext.exl3_mgemm(
+        x,
+        ptrs_t,
+        gout,
+        ptrs_suh,
+        gxhad,
+        ptrs_svh,
+        None,
+        None,
+        int(bitrate),
+        -1,
+        False,
+        False,
+        -1,
+        -1,
+        0,
+        1,
+        size_n_list,
+        c_ptrs,
     )
-    return {
-        "present": True,
-        "param_names": params,
-        "param_count": len(params),
-        "has_size_n_list": "size_n_list" in blob,
-        "has_c_ptrs": "c_ptrs" in blob,
-    }
 
 
 def main() -> int:
@@ -122,11 +140,22 @@ def main() -> int:
         default="",
         help="JSON path. Default results/mgemm_vs_gemm_<shapes>.json",
     )
+    parser.add_argument(
+        "--path",
+        choices=("native", "wrapper"),
+        default="native",
+        help="native=ext.exl3_*; wrapper=vLLM custom op (dispatch tax).",
+    )
+    parser.add_argument(
+        "--pad-unequal",
+        action="store_true",
+        help="Pad unequal-N groups to max(N) instead of size_n_list/c_ptrs.",
+    )
     args = parser.parse_args()
     names = resolve_shapes(args.shapes)
     k = BEHEMOTH_TP4_SHAPES[names[0]][0]
     widths = [BEHEMOTH_TP4_SHAPES[name][1] for name in names]
-    padded = len(set(widths)) != 1
+    unequal = len(set(widths)) != 1
     max_n = max(widths)
     group = len(names)
     ms = (
@@ -155,10 +184,25 @@ def main() -> int:
         return 2
     torch.cuda.set_device(args.device)
     device = torch.device("cuda", args.device)
-    _load_exl3_ext()
+    ext = _load_exl3_ext()
     mgemm_sig = _mgemm_signature()
+    use_widths = bool(
+        unequal
+        and mgemm_sig.get("has_size_n_list")
+        and mgemm_sig.get("has_c_ptrs")
+        and not args.pad_unequal
+    )
+    padded = bool(unequal and not use_widths)
+    if unequal and padded and args.path == "native" and not args.pad_unequal:
+        print(
+            "unequal N without size_n_list; pass --pad-unequal to force the "
+            "ruled-out padded path",
+            file=sys.stderr,
+        )
+        return 2
     print(
-        f"shapes={list(names)} K={k} Ns={widths} padded={int(padded)} "
+        f"shapes={list(names)} K={k} Ns={widths} path={args.path} "
+        f"padded={int(padded)} true_widths={int(use_widths)} "
         f"bitrate={args.bitrate} 3inst device={args.device} "
         f"size_n_list={mgemm_sig.get('has_size_n_list')}"
     )
@@ -221,6 +265,15 @@ def main() -> int:
             dtype=torch.int64,
             device=device,
         )
+        size_n_list = None
+        c_ptrs = None
+        if use_widths:
+            size_n_list = torch.tensor(widths, dtype=torch.int32, device=device)
+            c_ptrs = torch.tensor(
+                [int(out.data_ptr()) for out in outs],
+                dtype=torch.int64,
+                device=device,
+            )
 
         def many_gemms(
             trellis=true_trellis,
@@ -232,23 +285,43 @@ def main() -> int:
             for trellis_i, suh_i, svh_i, out_i, xhad_i in zip(
                 trellis, suh_list, svh_list, out_list, xhad_list
             ):
-                call_exl3_gemm(
-                    x, trellis_i, suh_i, svh_i, False, False,
-                    out=out_i, x_had=xhad_i,
-                )
+                if args.path == "wrapper":
+                    call_exl3_gemm(
+                        x, trellis_i, suh_i, svh_i, False, False,
+                        out=out_i, x_had=xhad_i,
+                    )
+                else:
+                    _native_gemm(
+                        ext, x, trellis_i, suh_i, svh_i, out_i, xhad_i
+                    )
 
         def one_mgemm():
-            call_exl3_mgemm(
-                x.view(1, m, k),
-                ptrs_t,
-                ptrs_suh,
-                ptrs_svh,
-                args.bitrate,
-                False,
-                False,
-                gout,
-                gxhad,
-            )
+            xin = x.view(1, m, k)
+            if args.path == "wrapper":
+                call_exl3_mgemm(
+                    xin,
+                    ptrs_t,
+                    ptrs_suh,
+                    ptrs_svh,
+                    args.bitrate,
+                    False,
+                    False,
+                    gout,
+                    gxhad,
+                )
+            else:
+                _native_mgemm(
+                    ext,
+                    xin,
+                    ptrs_t,
+                    gout,
+                    ptrs_suh,
+                    gxhad,
+                    ptrs_svh,
+                    args.bitrate,
+                    size_n_list,
+                    c_ptrs,
+                )
 
         many_gemms()
         one_mgemm()
@@ -257,6 +330,7 @@ def main() -> int:
         t_mgemm = _time_ms(one_mgemm, args.warmup, args.iters)
         layer_ms = {
             "m": m,
+            "path": args.path,
             "n_gemm_ms": t_gemm,
             "mgemm_ms": t_mgemm,
             "two_gemm_ms": t_gemm,
@@ -276,7 +350,9 @@ def main() -> int:
         "shapes": list(names),
         "k": k,
         "widths": widths,
+        "path": args.path,
         "padded_to_max_n": padded,
+        "true_widths": use_widths,
         "max_n": max_n,
         "bitrate": args.bitrate,
         "codebook": "3inst",

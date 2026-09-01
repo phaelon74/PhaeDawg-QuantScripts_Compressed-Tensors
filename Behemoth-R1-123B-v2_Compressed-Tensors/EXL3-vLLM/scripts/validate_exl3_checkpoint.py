@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -32,6 +33,8 @@ DECODER_LEAVES = {
     "up_proj",
     "down_proj",
 }
+
+LAYER_RE = re.compile(r"layers\.(\d+)\.")
 
 
 def _bytes(path: Path) -> int:
@@ -107,6 +110,7 @@ def main() -> int:
     bitrates = Counter()
     codebooks = Counter()
     leaf_bitrates: dict[str, Counter[int]] = defaultdict(Counter)
+    layer_bitrates: dict[int, dict[str, int]] = defaultdict(dict)
     for prefix, entry in storage.items():
         if entry.get("quant_format") != "exl3":
             continue
@@ -125,14 +129,22 @@ def main() -> int:
             decoder.append(prefix)
             bitrates[bitrate] += 1
             leaf_bitrates[leaf][bitrate] += 1
+            layer_match = LAYER_RE.search(prefix)
+            if layer_match:
+                layer_bitrates[int(layer_match.group(1))][leaf] = bitrate
     size = _bytes(ckpt)
     leaf_bitrate_dict = {
         leaf: dict(sorted(counts.items())) for leaf, counts in sorted(leaf_bitrates.items())
     }
+    decoder_layer_bitrates = [
+        {"layer": idx, **leaves}
+        for idx, leaves in sorted(layer_bitrates.items())
+    ]
     print(f"exl3_records={count}")
     print(f"decoder_linears={len(decoder)}")
     print(f"decoder_bitrates={dict(sorted(bitrates.items()))}")
     print(f"decoder_leaf_bitrates={leaf_bitrate_dict}")
+    print(f"decoder_layers_with_bitrates={len(decoder_layer_bitrates)}")
     print(f"codebooks={dict(codebooks)}")
     print(f"lm_head={head}")
     print(f"bytes={size} ({size / (1024**3):.2f} GiB)")
@@ -157,6 +169,7 @@ def main() -> int:
                     "head": head,
                     "bitrates": dict(sorted(bitrates.items())),
                     "decoder_leaf_bitrates": leaf_bitrate_dict,
+                    "decoder_layer_bitrates": decoder_layer_bitrates,
                     "codebooks": dict(codebooks),
                     "errors": errors,
                 },
