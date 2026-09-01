@@ -68,6 +68,16 @@ static int exl3_gemv_k56_mode()
 }}
 """
 
+GEMV_K4_ARITH_HELPER = f"""
+// {MARKER}: K4 cb0 arithmetic prototype. 1=explicit MAD, 2=batched MAD.
+static int exl3_gemv_k4_arith_mode()
+{{
+    const char* env = std::getenv("EXL3_GEMV_K4_ARITH");
+    int mode = env ? atoi(env) : 0;
+    return mode >= 1 && mode <= 2 ? mode : 0;
+}}
+"""
+
 GEMV_SM86_K4_POLICY = f"""
     // {MARKER}: measured RTX 3090 M=1 policy for Behemoth TP4 shapes.
     // Narrow GEMV wins for the large output projections; the regular kernel
@@ -82,6 +92,161 @@ GEMV_SM86_K4_POLICY = f"""
             return -1;
     }}
 """
+
+GEMV_K4_ARITH_SELECTOR = f"""
+// {MARKER}: isolated K4 arithmetic instances for A/B testing.
+static void* exl3_gemv_select_k4_arith(int mode)
+{{
+    if (mode == 1)
+        return (void*) exl3_gemv_kernel<4, false, 0, 0, 0, false, 1>;
+    if (mode == 2)
+        return (void*) exl3_gemv_kernel<4, false, 0, 0, 0, false, 2>;
+    return nullptr;
+}}
+"""
+
+GEMV_K4_ARITH_SELECT_OLD = (
+    "void* narrow_kernel = "
+    "exl3_gemv_select_kernel(K, cb, c_fp32, mmode, 0, smem);"
+)
+GEMV_K4_ARITH_SELECT_NEW = f"""void* narrow_kernel =
+        exl3_gemv_select_kernel(K, cb, c_fp32, mmode, 0, smem);
+    // {MARKER}: only alter the exact serving hotspot under explicit opt-in.
+    int k4_arith_mode = exl3_gemv_k4_arith_mode();
+    if (K == 4 && cb == 0 && !c_fp32 && mmode == 0 &&
+        !smem && k4_arith_mode)
+        narrow_kernel = exl3_gemv_select_k4_arith(k4_arith_mode);"""
+
+K4_ARITH_KERNEL_MARKER = f"{MARKER}: K4 cb0 batched arithmetic"
+K4_ARITH_KERNEL_HELPERS = f"""
+// {K4_ARITH_KERNEL_MARKER}
+__device__ __forceinline__ uint32_t cb0_mad_(uint32_t x)
+{{
+    uint32_t r;
+    asm ("mad.lo.u32 %0, %1, %2, %3;"
+         : "=r"(r)
+         : "r"(x), "n"(89226354u), "n"(64248484u));
+    return r;
+}}
+
+__device__ __forceinline__ uint32_t cb0_lop3_(uint32_t x)
+{{
+    asm ("lop3.b32 %0, %0, 0x8fff8fff, 0x3b603b60, 0x6a;"
+         : "+r"(x));
+    return x;
+}}
+
+__device__ __forceinline__ half2 cb0_pack_(uint32_t x0, uint32_t x1)
+{{
+    half2_uint32 xu0(x0);
+    half2_uint32 xu1(x1);
+    half2 d0 = __lows2half2(xu0.as_half2, xu1.as_half2);
+    half2 d1 = __highs2half2(xu0.as_half2, xu1.as_half2);
+    return __hadd2(d0, d1);
+}}
+
+__device__ __forceinline__ half2 decode_pair_cb0_mad_(
+    uint32_t x0, uint32_t x1)
+{{
+    x0 = cb0_mad_(x0);
+    x1 = cb0_mad_(x1);
+    x0 = cb0_lop3_(x0);
+    x1 = cb0_lop3_(x1);
+    return cb0_pack_(x0, x1);
+}}
+
+__device__ __forceinline__ void decode8_cb0_batched_(
+    uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w3,
+    uint32_t w4, uint32_t w5, uint32_t w6, uint32_t w7,
+    FragB& f0, FragB& f1)
+{{
+    w0 = cb0_mad_(w0);
+    w1 = cb0_mad_(w1);
+    w2 = cb0_mad_(w2);
+    w3 = cb0_mad_(w3);
+    w4 = cb0_mad_(w4);
+    w5 = cb0_mad_(w5);
+    w6 = cb0_mad_(w6);
+    w7 = cb0_mad_(w7);
+    w0 = cb0_lop3_(w0);
+    w1 = cb0_lop3_(w1);
+    w2 = cb0_lop3_(w2);
+    w3 = cb0_lop3_(w3);
+    w4 = cb0_lop3_(w4);
+    w5 = cb0_lop3_(w5);
+    w6 = cb0_lop3_(w6);
+    w7 = cb0_lop3_(w7);
+    f0[0] = cb0_pack_(w0, w1);
+    f0[1] = cb0_pack_(w2, w3);
+    f1[0] = cb0_pack_(w4, w5);
+    f1[1] = cb0_pack_(w6, w7);
+}}
+"""
+
+K4_DECODE8_TEMPLATE_OLD = """template <int cb>
+__device__ __forceinline__ void decode8"""
+K4_DECODE8_TEMPLATE_NEW = """template <int cb, int K4_ARITH_MODE = 0>
+__device__ __forceinline__ void decode8"""
+
+K4_DECODE8_BODY_OLD = """    else
+    {
+        f0[0] = decode_3inst_2<cb>(w0, w1);
+        f0[1] = decode_3inst_2<cb>(w2, w3);
+        f1[0] = decode_3inst_2<cb>(w4, w5);
+        f1[1] = decode_3inst_2<cb>(w6, w7);
+    }"""
+K4_DECODE8_BODY_NEW = """    else if constexpr (cb == 0 && K4_ARITH_MODE == 2)
+    {
+        decode8_cb0_batched_(
+            w0, w1, w2, w3, w4, w5, w6, w7, f0, f1);
+    }
+    else if constexpr (cb == 0 && K4_ARITH_MODE == 1)
+    {
+        f0[0] = decode_pair_cb0_mad_(w0, w1);
+        f0[1] = decode_pair_cb0_mad_(w2, w3);
+        f1[0] = decode_pair_cb0_mad_(w4, w5);
+        f1[1] = decode_pair_cb0_mad_(w6, w7);
+    }
+    else
+    {
+        f0[0] = decode_3inst_2<cb>(w0, w1);
+        f0[1] = decode_3inst_2<cb>(w2, w3);
+        f1[0] = decode_3inst_2<cb>(w4, w5);
+        f1[1] = decode_3inst_2<cb>(w6, w7);
+    }"""
+
+K4_DQ_TEMPLATE_OLD = """template <int cb>
+__device__ __forceinline__ void dq8_regs_4bits"""
+K4_DQ_TEMPLATE_NEW = """template <int cb, int K4_ARITH_MODE = 0>
+__device__ __forceinline__ void dq8_regs_4bits"""
+K4_DQ_CALL_OLD = (
+    "decode8<cb>(w0, w1, w2, w3, w4, w5, w6, w7, f0, f1);"
+)
+K4_DQ_CALL_NEW = (
+    "decode8<cb, K4_ARITH_MODE>"
+    "(w0, w1, w2, w3, w4, w5, w6, w7, f0, f1);"
+)
+K4_KERNEL_TEMPLATE_OLD = (
+    "template <int bits, bool c_fp32, int cb, int MMODE, "
+    "int CFG, bool SMEM_STAGE>"
+)
+K4_KERNEL_TEMPLATE_NEW = (
+    "template <int bits, bool c_fp32, int cb, int MMODE, "
+    "int CFG, bool SMEM_STAGE, int K4_ARITH_MODE = 0>"
+)
+K4_ARITH_ASSERT_MARKER = f"{MARKER}: isolate K4 arithmetic instances"
+K4_KERNEL_ASSERT = f"""
+    // {K4_ARITH_ASSERT_MARKER}.
+    static_assert(K4_ARITH_MODE == 0 ||
+                  ((K4_ARITH_MODE == 1 || K4_ARITH_MODE == 2) &&
+                   bits == 4 && cb == 0 && !c_fp32 &&
+                   MMODE == 0 && CFG == 0 && !SMEM_STAGE));"""
+K4_KERNEL_DQ_CALL_OLD = (
+    "exl3_gemv_ns::dq8_regs_4bits<cb>("
+)
+K4_KERNEL_DQ_CALL_NEW = (
+    "exl3_gemv_ns::dq8_regs_4bits<cb, K4_ARITH_MODE>("
+)
 
 K56_KERNEL_MARKER = f"{MARKER}: K5/K6 lightweight staged GEMV"
 
@@ -288,6 +453,13 @@ def apply(src: Path) -> None:
         if needle not in text:
             raise SystemExit(f"{gemv}: missing exl3_gemv_env_mode")
         text = text.replace(needle, GEMV_K56_HELPER + "\n" + needle, 1)
+    if "exl3_gemv_k4_arith_mode" not in text:
+        needle = "static int exl3_gemv_env_mode()"
+        if needle not in text:
+            raise SystemExit(f"{gemv}: missing exl3_gemv_env_mode")
+        text = text.replace(
+            needle, GEMV_K4_ARITH_HELPER + "\n" + needle, 1
+        )
     text = text.replace(
         "!exl3_gemv_allow_k56()", "exl3_gemv_k56_mode() == 0"
     )
@@ -395,6 +567,20 @@ def apply(src: Path) -> None:
             ": exl3_gemv_env_smem() == 1;",
             gemv,
         )
+    if "exl3_gemv_select_k4_arith" not in text:
+        needle = "bool exl3_gemv_try_launch"
+        if needle not in text:
+            raise SystemExit(f"{gemv}: GEMV launch function not found")
+        text = text.replace(
+            needle, GEMV_K4_ARITH_SELECTOR + "\n" + needle, 1
+        )
+    if "only alter the exact serving hotspot" not in text:
+        text = _replace_once(
+            text,
+            GEMV_K4_ARITH_SELECT_OLD,
+            GEMV_K4_ARITH_SELECT_NEW,
+            gemv,
+        )
     gemv.write_text(text, encoding="utf-8")
 
     gemv_kernel = quant / "exl3_gemv_kernel.cuh"
@@ -459,6 +645,52 @@ def apply(src: Path) -> None:
             raise SystemExit(f"{gemv_kernel}: 3-bit register branch not found")
         kernel_text = kernel_text.replace(
             needle, K56_REGISTER_DECODE + needle, 1
+        )
+    if K4_ARITH_KERNEL_MARKER not in kernel_text:
+        needle = "template <int cb>\n__device__ __forceinline__ void decode8"
+        if needle not in kernel_text:
+            raise SystemExit(f"{gemv_kernel}: decode8 function not found")
+        kernel_text = kernel_text.replace(
+            needle,
+            K4_ARITH_KERNEL_HELPERS
+            + "\n"
+            + K4_DECODE8_TEMPLATE_NEW,
+            1,
+        )
+        kernel_text = _replace_once(
+            kernel_text,
+            K4_DECODE8_BODY_OLD,
+            K4_DECODE8_BODY_NEW,
+            gemv_kernel,
+        )
+        kernel_text = _replace_once(
+            kernel_text,
+            K4_DQ_TEMPLATE_OLD,
+            K4_DQ_TEMPLATE_NEW,
+            gemv_kernel,
+        )
+        kernel_text = _replace_once(
+            kernel_text,
+            K4_DQ_CALL_OLD,
+            K4_DQ_CALL_NEW,
+            gemv_kernel,
+        )
+        kernel_text = _replace_once(
+            kernel_text,
+            K4_KERNEL_TEMPLATE_OLD,
+            K4_KERNEL_TEMPLATE_NEW,
+            gemv_kernel,
+        )
+        kernel_text = kernel_text.replace(
+            K4_KERNEL_DQ_CALL_OLD,
+            K4_KERNEL_DQ_CALL_NEW,
+        )
+    if K4_ARITH_ASSERT_MARKER not in kernel_text:
+        needle = K56_ASSERT_NEW
+        if needle not in kernel_text:
+            raise SystemExit(f"{gemv_kernel}: K5/K6 assertion not found")
+        kernel_text = kernel_text.replace(
+            needle, needle + K4_KERNEL_ASSERT, 1
         )
     gemv_kernel.write_text(kernel_text, encoding="utf-8")
 

@@ -32,6 +32,11 @@ def test_overlay_files_exist():
     assert "SMEM_STAGE || bits > 4" in text
     assert "dq_dispatch<bits, cb>(tp, lane << 3, f0, f1)" in text
     assert "dq4_regs_k56<bits, cb>" in text
+    assert "EXL3_GEMV_K4_ARITH" in text
+    assert "exl3_gemv_select_k4_arith" in text
+    assert "decode_pair_cb0_mad_" in text
+    assert "decode8_cb0_batched_" in text
+    assert "K4_ARITH_MODE = 0" in text
     assert "Do not hook decode_3inst" in text
     assert "exl3_lut_decode<cb>(x)" in text  # leftover-hook stripper only
 

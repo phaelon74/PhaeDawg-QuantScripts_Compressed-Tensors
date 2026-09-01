@@ -19,13 +19,17 @@ What the overlay changes:
    memory. Mode 2 uses conflict-free shared reads for words 0–31 and warp
    shuffles for words 32–47, avoiding the staged path's bank conflicts
    without paying for two shuffles per source. Both remain opt-in.
-3. **16-bit codebook LUT fill** (`exl3_decode_lut.cu`): 65536 fp16 entries
+3. **Experimental K4 cb0 arithmetic** (`exl3_gemv_kernel.cuh`): mode 1
+   forces one `mad.lo.u32` per code, while mode 2 batches eight independent
+   MAD/LOP3 chains to expose more instruction-level parallelism. Set
+   `EXL3_GEMV_K4_ARITH=1` or `2`; mode 0 retains the current kernel.
+4. **16-bit codebook LUT fill** (`exl3_decode_lut.cu`): 65536 fp16 entries
    per codebook in global memory. Compiled but not invoked yet: without
    `-rdc`, nvcc treats `extern __constant__` as a per-translation-unit
    static (warning 20044), so a flag set in the fill TU never reaches GEMM
    kernels. Arithmetic `decode_3inst` stays live. `EXL3_GEMV_LUT=0` is
    reserved for when the LUT is wired as a GEMV kernel argument.
-4. **INT8-activation GEMV on 3inst** (`exl3_gemm.cu`): `EXL3_INT8_GEMV_CB=1`
+5. **INT8-activation GEMV on 3inst** (`exl3_gemm.cu`): `EXL3_INT8_GEMV_CB=1`
    also tries `exl3_gemv_int8` for cb=0. Default off. KLD-gate before serving.
 
 Markers: `Phaedawg-SM86-overlay`. Re-running the applier is idempotent.
@@ -34,6 +38,26 @@ Markers: `Phaedawg-SM86-overlay`. Re-running the applier is idempotent.
 export EXL3=/home/phaedawg/kld-exl3-vllm/PhaeDawg-QuantScripts_Compressed-Tensors/Behemoth-R1-123B-v2_Compressed-Tensors/EXL3-vLLM
 bash "$EXL3/scripts/fork_exllamav3.sh"
 bash "$EXL3/scripts/build_exllamav3_ext.sh"
+```
+
+K4 arithmetic acceptance sequence on one RTX 3090:
+
+```bash
+EXL3_GEMV_K4_ARITH=2 python -m pytest tests/test_cuda_parity.py \
+  -k 'k4_arithmetic_gemv' -q
+
+for mode in 0 1 2; do
+  if [[ "$mode" == 0 ]]; then
+    unset EXL3_GEMV_K4_ARITH
+  else
+    export EXL3_GEMV_K4_ARITH="$mode"
+  fi
+  python scripts/kernel_microbench.py \
+    --device 0 --bitrates 4 --m 1 \
+    --shapes o_proj,gate_proj,up_proj,down_proj \
+    --warmup 10 --iters 100 \
+    --output "results/k4_arith_mode${mode}_m1.json"
+done
 ```
 
 K5/K6 acceptance sequence on one RTX 3090:

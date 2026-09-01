@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ncu one M=1 projection kernel. Stop serve first. Physical GPU 1 only.
 #   export EXL3=...
-#   sudo -E bash "$EXL3/scripts/profile_ncu_gate.sh" OUT LEAF BITRATE [regular|staged|hybrid]
+#   sudo -E bash "$EXL3/scripts/profile_ncu_gate.sh" OUT LEAF BITRATE [regular|staged|hybrid|k4-mad|k4-batch]
 set -euo pipefail
 EXL3="${EXL3:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 OUT="${1:-$EXL3/results/phase0/ncu_gate_m1}"
@@ -24,11 +24,13 @@ export LD_LIBRARY_PATH="$("$PYTHON_BIN" -c 'import pathlib, torch; print(pathlib
 export VLLM_EXL3_FORCE_COMPRESSED=1
 export VLLM_EXL3_NVTX=1
 case "$KERNEL" in
-  regular) unset EXL3_GEMV_K56 ;;
-  staged|k56) export EXL3_GEMV_K56=1 ;;
-  hybrid|register) export EXL3_GEMV_K56=2 ;;
+  regular) unset EXL3_GEMV_K56 EXL3_GEMV_K4_ARITH ;;
+  staged|k56) unset EXL3_GEMV_K4_ARITH; export EXL3_GEMV_K56=1 ;;
+  hybrid|register) unset EXL3_GEMV_K4_ARITH; export EXL3_GEMV_K56=2 ;;
+  k4-mad) unset EXL3_GEMV_K56; export EXL3_GEMV_K4_ARITH=1 ;;
+  k4-batch) unset EXL3_GEMV_K56; export EXL3_GEMV_K4_ARITH=2 ;;
   *)
-    echo "kernel must be regular, staged, or hybrid; got: $KERNEL" >&2
+    echo "kernel must be regular, staged, hybrid, k4-mad, or k4-batch; got: $KERNEL" >&2
     exit 2
     ;;
 esac
