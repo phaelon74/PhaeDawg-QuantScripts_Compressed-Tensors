@@ -6,6 +6,7 @@ Patches the pinned commit in place. Safe to re-run (idempotent via markers).
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -281,16 +282,24 @@ K4_KERNEL_DQ_CALL_NEW = (
 )
 
 K4_SLIM_KERNEL_MARKER = f"{MARKER}: K4 narrow-16 occupancy layout"
-K4_SLIM_WK_OLD = "constexpr int WK = CFG == 0 ? 16 : 8;"
+K4_SLIM_WK_PATTERN = (
+    r"constexpr\s+int\s+WK\s*=\s*CFG\s*==\s*0\s*\?\s*16\s*:\s*8\s*;"
+)
 K4_SLIM_WK_NEW = f"""// {K4_SLIM_KERNEL_MARKER}. CFG 2 uses one n-tile per warp.
     constexpr int WK = CFG == 0 ? 16 : 8;"""
-K4_SLIM_WNT_OLD = "constexpr int WNT = CFG == 0 ? 2 : 4;"
+K4_SLIM_WNT_PATTERN = (
+    r"constexpr\s+int\s+WNT\s*=\s*CFG\s*==\s*0\s*\?\s*2\s*:\s*4\s*;"
+)
 K4_SLIM_WNT_NEW = (
     "constexpr int WNT = CFG == 0 ? 2 : (CFG == 1 ? 4 : 1);"
 )
-K4_SLIM_PF_OLD = "constexpr int PF = CFG == 0 ? 4 : 2;"
+K4_SLIM_PF_PATTERN = (
+    r"constexpr\s+int\s+PF\s*=\s*CFG\s*==\s*0\s*\?\s*4\s*:\s*2\s*;"
+)
 K4_SLIM_PF_NEW = "constexpr int PF = CFG == 1 ? 2 : 4;"
-K4_SLIM_FOLD_OLD = "constexpr int FOLD = CFG == 0 ? 4 : 2;"
+K4_SLIM_FOLD_PATTERN = (
+    r"constexpr\s+int\s+FOLD\s*=\s*CFG\s*==\s*0\s*\?\s*4\s*:\s*2\s*;"
+)
 K4_SLIM_FOLD_NEW = "constexpr int FOLD = CFG == 1 ? 2 : 4;"
 
 K56_KERNEL_MARKER = f"{MARKER}: K5/K6 lightweight staged GEMV"
@@ -475,6 +484,15 @@ def _replace_once(text: str, old: str, new: str, path: Path) -> str:
     if old not in text:
         raise SystemExit(f"{path}: expected snippet not found:\n{old[:120]}")
     return text.replace(old, new, 1)
+
+
+def _replace_regex_once(
+    text: str, pattern: str, new: str, path: Path
+) -> str:
+    replaced, count = re.subn(pattern, new, text, count=1)
+    if count != 1:
+        raise SystemExit(f"{path}: expected pattern not found:\n{pattern}")
+    return replaced
 
 
 def apply(src: Path) -> None:
@@ -758,27 +776,27 @@ def apply(src: Path) -> None:
             needle, needle + K4_KERNEL_ASSERT, 1
         )
     if K4_SLIM_KERNEL_MARKER not in kernel_text:
-        kernel_text = _replace_once(
+        kernel_text = _replace_regex_once(
             kernel_text,
-            K4_SLIM_WK_OLD,
+            K4_SLIM_WK_PATTERN,
             K4_SLIM_WK_NEW,
             gemv_kernel,
         )
-        kernel_text = _replace_once(
+        kernel_text = _replace_regex_once(
             kernel_text,
-            K4_SLIM_WNT_OLD,
+            K4_SLIM_WNT_PATTERN,
             K4_SLIM_WNT_NEW,
             gemv_kernel,
         )
-        kernel_text = _replace_once(
+        kernel_text = _replace_regex_once(
             kernel_text,
-            K4_SLIM_PF_OLD,
+            K4_SLIM_PF_PATTERN,
             K4_SLIM_PF_NEW,
             gemv_kernel,
         )
-        kernel_text = _replace_once(
+        kernel_text = _replace_regex_once(
             kernel_text,
-            K4_SLIM_FOLD_OLD,
+            K4_SLIM_FOLD_PATTERN,
             K4_SLIM_FOLD_NEW,
             gemv_kernel,
         )
