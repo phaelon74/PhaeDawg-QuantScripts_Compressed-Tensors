@@ -27,7 +27,7 @@ echo "Profiling leaf=$LEAF bitrate=$BITRATE with $PYTHON_BIN"
 "$NCU_BIN" --set full --target-processes all \
   --metrics sm__inst_executed_pipe_alu.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct,smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active.pct,smsp__sass_average_data_bytes_per_sector_mem_global_op_ld.pct \
   --kernel-name regex:exl3 \
-  --launch-skip 8 --launch-count 12 \
+  --launch-skip 8 --launch-count 1 \
   -o "$OUT" --force-overwrite \
   "$PYTHON_BIN" "$EXL3/scripts/profile_decode_nsys.py" \
     --device 0 --m 1 --bitrate "$BITRATE" --codebook 3inst \
