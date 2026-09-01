@@ -90,6 +90,19 @@ def main() -> int:
     serving_ms = (
         1000.0 / args.serving_tok_s if args.serving_tok_s > 0 else None
     )
+    native_non_gemm_ms = (
+        serving_ms - native_ms if serving_ms is not None else None
+    )
+    required_native_ms = (
+        target_ms - native_non_gemm_ms
+        if native_non_gemm_ms is not None
+        else None
+    )
+    native_reduction_ms = (
+        native_ms - required_native_ms
+        if required_native_ms is not None
+        else None
+    )
     report = {
         "checkpoint": inventory.get("checkpoint"),
         "codebook": codebook,
@@ -108,6 +121,14 @@ def main() -> int:
         "measured_serving_ms": serving_ms,
         "non_gemm_ms_if_plugin_budget": (
             serving_ms - plugin_ms if serving_ms is not None else None
+        ),
+        "non_gemm_ms_if_native_budget": native_non_gemm_ms,
+        "required_native_ms_at_target": required_native_ms,
+        "required_native_reduction_ms": native_reduction_ms,
+        "required_native_reduction_pct": (
+            100.0 * native_reduction_ms / native_ms
+            if native_reduction_ms is not None and native_ms
+            else None
         ),
         "rows": used,
         "missing": missing,
