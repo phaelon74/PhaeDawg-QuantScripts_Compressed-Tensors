@@ -81,8 +81,9 @@ def _reconstruct_ref(
 
 
 @pytest.mark.parametrize("bitrate", [5, 6])
-def test_k56_3inst_gemv_matches_reconstruct(bitrate, monkeypatch):
-    monkeypatch.setenv("EXL3_GEMV_K56", "1")
+@pytest.mark.parametrize("mode", [1, 2])
+def test_k56_3inst_gemv_matches_reconstruct(bitrate, mode, monkeypatch):
+    monkeypatch.setenv("EXL3_GEMV_K56", str(mode))
     monkeypatch.setenv("VLLM_EXL3_FORCE_COMPRESSED", "1")
     monkeypatch.delenv("VLLM_EXL3_FORCE_RECONSTRUCT", raising=False)
     ext = _ext()
@@ -109,7 +110,8 @@ def test_k56_3inst_gemv_matches_reconstruct(bitrate, monkeypatch):
     if not torch.allclose(got, ref, rtol=5e-2, atol=0.75):
         max_err = (got.float() - ref.float()).abs().max().item()
         pytest.fail(
-            f"K{bitrate} 3inst GEMV parity failed: max_err={max_err}"
+            f"K{bitrate} mode={mode} 3inst GEMV parity failed: "
+            f"max_err={max_err}"
         )
 
 

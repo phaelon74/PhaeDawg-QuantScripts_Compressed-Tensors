@@ -17,13 +17,13 @@ GEMV_K_GUARD_OLD = "if (K < 2 || K > 4) return -1;"
 GEMV_K_GUARD_NEW = (
     f"if (K < 2 || K > 6) return -1; // {MARKER}: K5/K6 opt-in GEMV\n"
     "    if (K > 4 && (cb != 0 || size_m != 1 || "
-    "!exl3_gemv_allow_k56())) return -1;"
+    "exl3_gemv_k56_mode() == 0)) return -1;"
 )
 GEMV_TRY_K_GUARD_OLD = "if (K < 2 || K > 4) return false;"
 GEMV_TRY_K_GUARD_NEW = (
     f"if (K < 2 || K > 6) return false; // {MARKER}: K5/K6 opt-in GEMV\n"
     "    if (K > 4 && (cb != 0 || size_m != 1 || "
-    "!exl3_gemv_allow_k56())) return false;"
+    "exl3_gemv_k56_mode() == 0)) return false;"
 )
 GEMV_CB_GUARD_OLD = "if (K != 4 && cb == 0) return -1;"
 GEMV_CB_GUARD_NEW = (
@@ -44,7 +44,8 @@ GEMV_SELECT_NEW = f""" SEL_GRID(4, 0, false) SEL_GRID(4, 1, false) SEL_GRID(4, 2
  SEL_GRID(2, 0, false) SEL_GRID(2, 1, false) SEL_GRID(2, 2, false) SEL_GRID(2, 1, true) SEL_GRID(2, 2, true)
  SEL_GRID(3, 0, false) SEL_GRID(3, 1, false) SEL_GRID(3, 2, false) SEL_GRID(3, 1, true) SEL_GRID(3, 2, true)
  SEL(5, 0, false, 0, 0, true) SEL(6, 0, false, 0, 0, true)
- /* {MARKER}: 3inst cb=0 for K=2,3; opt-in staged K5/K6 */"""
+ SEL(5, 0, false, 0, 0, false) SEL(6, 0, false, 0, 0, false)
+ /* {MARKER}: 3inst cb=0 for K=2,3; opt-in staged/register K5/K6 */"""
 
 GEMV_HELPER = (
     f"\n// {MARKER}: allow implicit 3inst GEMV (cb=0) at K=2,3 when "
@@ -59,11 +60,11 @@ GEMV_HELPER = (
 )
 
 GEMV_K56_HELPER = f"""
-// {MARKER}: opt-in K5/K6 lightweight M=1 GEMV prototype.
-static bool exl3_gemv_allow_k56()
+// {MARKER}: K5/K6 M=1 prototype. 1=staged, 2=register extraction.
+static int exl3_gemv_k56_mode()
 {{
     const char* env = std::getenv("EXL3_GEMV_K56");
-    return env && atoi(env) > 0;
+    return env ? atoi(env) : 0;
 }}
 """
 
@@ -93,7 +94,7 @@ K56_ASSERT_NEW = f"""static_assert(bits >= 2 && bits <= 6);
     // register-spill profiling have passed on SM86.
     static_assert(bits <= 4 ||
                   (cb == 0 && !c_fp32 && MMODE == 0 &&
-                   CFG == 0 && SMEM_STAGE));"""
+                   CFG == 0));"""
 
 K56_CONSTANTS_OLD = """    constexpr int LOADS = bits == 2 ? WNT / 2 : WNT;        // warp loads per k-slice
     constexpr int LSTRIDE = bits == 3 ? 24 : 32;            // uint32 per load"""
@@ -159,6 +160,86 @@ K56_DECODE_BRANCH_NEW = """                    if constexpr (bits == 5 || bits =
                     else
                         exl3_gemv_ns::dq8_regs_3bits<cb>(tp[x_src_a], tp[x_src_b], x_s2, f0, f1);"""
 
+K56_REGISTER_MARKER = f"{MARKER}: K5/K6 register extraction"
+K56_REGISTER_HELPER = f"""
+// {K56_REGISTER_MARKER}: one four-value trellis window.
+template <int bits>
+__device__ __forceinline__ void dq4_regs_k56
+(
+    uint32_t a,
+    uint32_t b,
+    int s2,
+    FragB& frag
+)
+{{
+    uint32_t w3 = fshift(b, a, s2) & 0xffff;
+    uint32_t w2 = fshift(b, a, s2 + bits) & 0xffff;
+    uint32_t w1 = fshift(b, a, s2 + bits * 2) & 0xffff;
+    uint32_t w0 = fshift(b, a, s2 + bits * 3) & 0xffff;
+    frag[0] = decode_3inst_2(w0, w1);
+    frag[1] = decode_3inst_2(w2, w3);
+}}
+"""
+
+K56_REGISTER_PRECOMPUTE = f"""
+    // {K56_REGISTER_MARKER}: source words for two dq4 windows.
+    [[maybe_unused]] int x56_a0 = 0, x56_b0 = 0, x56_s0 = 0;
+    [[maybe_unused]] int x56_a1 = 0, x56_b1 = 0, x56_s1 = 0;
+    if constexpr (bits == 5 || bits == 6)
+    {{
+        int t0 = lane << 3;
+        int p0 = (t0 + 257) * bits - 16;
+        int e0 = p0 + 3 * bits + 16;
+        int i00 = p0 / 32;
+        int i02 = (e0 - 1) / 32;
+        x56_s0 = (i02 + 1) * 32 - e0;
+        x56_a0 = i00 % TWORDS;
+        x56_b0 = i02 % TWORDS;
+
+        int t1 = t0 + 4;
+        int p1 = (t1 + 257) * bits - 16;
+        int e1 = p1 + 3 * bits + 16;
+        int i10 = p1 / 32;
+        int i12 = (e1 - 1) / 32;
+        x56_s1 = (i12 + 1) * 32 - e1;
+        x56_a1 = i10 % TWORDS;
+        x56_b1 = i12 % TWORDS;
+    }}
+"""
+
+K56_REGISTER_DECODE = """                else if constexpr (bits == 5 || bits == 6)
+                {
+                    uint32_t lo = bw[t * WORD_GROUPS];
+                    uint32_t hi = bw[t * WORD_GROUPS + 1];
+
+                    uint32_t av_lo = __shfl_sync(
+                        0xffffffffu, lo, x56_a0 & 31);
+                    uint32_t av_hi = __shfl_sync(
+                        0xffffffffu, hi, x56_a0 & 31);
+                    uint32_t bv_lo = __shfl_sync(
+                        0xffffffffu, lo, x56_b0 & 31);
+                    uint32_t bv_hi = __shfl_sync(
+                        0xffffffffu, hi, x56_b0 & 31);
+                    uint32_t av = x56_a0 < 32 ? av_lo : av_hi;
+                    uint32_t bv = x56_b0 < 32 ? bv_lo : bv_hi;
+                    exl3_gemv_ns::dq4_regs_k56<bits>(
+                        av, bv, x56_s0, f0);
+
+                    av_lo = __shfl_sync(
+                        0xffffffffu, lo, x56_a1 & 31);
+                    av_hi = __shfl_sync(
+                        0xffffffffu, hi, x56_a1 & 31);
+                    bv_lo = __shfl_sync(
+                        0xffffffffu, lo, x56_b1 & 31);
+                    bv_hi = __shfl_sync(
+                        0xffffffffu, hi, x56_b1 & 31);
+                    av = x56_a1 < 32 ? av_lo : av_hi;
+                    bv = x56_b1 < 32 ? bv_lo : bv_hi;
+                    exl3_gemv_ns::dq4_regs_k56<bits>(
+                        av, bv, x56_s1, f1);
+                }
+"""
+
 INT8_GATE_OLD = "if (mul1 && exl3_gemv_int8_enabled())"
 INT8_GATE_NEW = (
     f"bool int8_cb = []() {{ const char* e = std::getenv(\"EXL3_INT8_GEMV_CB\"); "
@@ -205,11 +286,14 @@ def apply(src: Path) -> None:
         if needle not in text:
             raise SystemExit(f"{gemv}: missing exl3_gemv_env_mode")
         text = text.replace(needle, GEMV_HELPER + "\n" + needle, 1)
-    if "exl3_gemv_allow_k56" not in text:
+    if "exl3_gemv_k56_mode" not in text:
         needle = "static int exl3_gemv_env_mode()"
         if needle not in text:
             raise SystemExit(f"{gemv}: missing exl3_gemv_env_mode")
         text = text.replace(needle, GEMV_K56_HELPER + "\n" + needle, 1)
+    text = text.replace(
+        "!exl3_gemv_allow_k56()", "exl3_gemv_k56_mode() == 0"
+    )
     if "measured RTX 3090 M=1 policy" not in text:
         needle = "    if (mode == 2) return size_n <= 8192 ? 0 : 1;"
         if needle not in text:
@@ -290,11 +374,28 @@ def apply(src: Path) -> None:
             + needle,
             1,
         )
-    if "K > 4 ? true : exl3_gemv_env_smem()" not in text:
+    if "SEL(5, 0, false, 0, 0, false)" not in text:
+        needle = " #undef SEL_GRID"
+        text = text.replace(
+            needle,
+            " SEL(5, 0, false, 0, 0, false) "
+            "SEL(6, 0, false, 0, 0, false)\n"
+            f" /* {MARKER}: register K5/K6 */\n"
+            + needle,
+            1,
+        )
+    if "K > 4 ? exl3_gemv_k56_mode() == 1" not in text:
+        text = text.replace(
+            "bool smem = K > 4 ? true : exl3_gemv_env_smem() == 1;",
+            "bool smem = K > 4 ? exl3_gemv_k56_mode() == 1 "
+            ": exl3_gemv_env_smem() == 1;",
+        )
+    if "K > 4 ? exl3_gemv_k56_mode() == 1" not in text:
         text = _replace_once(
             text,
             "bool smem = exl3_gemv_env_smem() == 1;",
-            "bool smem = K > 4 ? true : exl3_gemv_env_smem() == 1;",
+            "bool smem = K > 4 ? exl3_gemv_k56_mode() == 1 "
+            ": exl3_gemv_env_smem() == 1;",
             gemv,
         )
     gemv.write_text(text, encoding="utf-8")
@@ -326,7 +427,26 @@ def apply(src: Path) -> None:
             K56_DECODE_BRANCH_NEW,
             gemv_kernel,
         )
-        gemv_kernel.write_text(kernel_text, encoding="utf-8")
+    if K56_REGISTER_MARKER not in kernel_text:
+        needle = "}  // namespace exl3_gemv_ns"
+        if needle not in kernel_text:
+            raise SystemExit(f"{gemv_kernel}: GEMV namespace end not found")
+        kernel_text = kernel_text.replace(
+            needle, K56_REGISTER_HELPER + "\n" + needle, 1
+        )
+        needle = "    __shared__ float sh_red[WK][ROWS][COLS];"
+        if needle not in kernel_text:
+            raise SystemExit(f"{gemv_kernel}: reduction storage not found")
+        kernel_text = kernel_text.replace(
+            needle, K56_REGISTER_PRECOMPUTE + "\n" + needle, 1
+        )
+        needle = "                else  // bits == 3"
+        if needle not in kernel_text:
+            raise SystemExit(f"{gemv_kernel}: 3-bit register branch not found")
+        kernel_text = kernel_text.replace(
+            needle, K56_REGISTER_DECODE + needle, 1
+        )
+    gemv_kernel.write_text(kernel_text, encoding="utf-8")
 
     gemm = quant / "exl3_gemm.cu"
     text = gemm.read_text(encoding="utf-8")

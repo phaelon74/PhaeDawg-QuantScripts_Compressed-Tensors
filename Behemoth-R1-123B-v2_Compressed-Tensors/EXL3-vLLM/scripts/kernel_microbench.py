@@ -133,8 +133,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--gemv-k56",
-        action="store_true",
-        help="Set EXL3_GEMV_K56=1 for the opt-in M=1 cb0 kernel.",
+        nargs="?",
+        const=1,
+        type=int,
+        choices=(1, 2),
+        default=0,
+        help="K5/K6 M=1 cb0 mode: 1=staged, 2=register extraction.",
     )
     parser.add_argument(
         "--m",
@@ -178,7 +182,7 @@ def main() -> int:
         return 2
 
     if args.gemv_k56:
-        os.environ["EXL3_GEMV_K56"] = "1"
+        os.environ["EXL3_GEMV_K56"] = str(args.gemv_k56)
     torch.cuda.set_device(args.device)
     device = torch.device("cuda", args.device)
     ext = _load_exl3_ext()
@@ -208,7 +212,7 @@ def main() -> int:
     print(
         f"codebook={codebook} mcg={int(args.mcg)} mul1={int(args.mul1)} "
         f"bitrates={bitrates} m={ms} shapes={shape_names} "
-        f"gemv_k56={int(args.gemv_k56)} device={args.device}"
+        f"gemv_k56={args.gemv_k56} device={args.device}"
     )
     for name in shape_names:
         k, n = BEHEMOTH_TP4_SHAPES[name]
@@ -340,6 +344,7 @@ def main() -> int:
                 "mcg": bool(args.mcg),
                 "mul1": bool(args.mul1),
                 "gemv_k56": bool(args.gemv_k56),
+                "gemv_k56_mode": args.gemv_k56,
                 "shapes": shape_names,
                 "rows": rows,
                 "failures": failures,
