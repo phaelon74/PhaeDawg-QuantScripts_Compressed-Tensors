@@ -260,39 +260,44 @@ __device__ __forceinline__ half2 cb0_fold_(uint32_t x)
     return xu.as_half2;
 }}
 
-// Same window order as dq8_regs_4bits, but each weight stays a (lo, hi) pair.
-// g0/g1 are the low n-half (cols 0-7), g2/g3 the high n-half, and within each
-// pair the second register carries the k+8 window.
-template <int cb>
-__device__ __forceinline__ void dq8_regs_4bits_tcfold
+// Half of dq8_regs_4bits' window set, with each weight left as a (lo, hi) pair.
+// The control kernel sits at exactly 64 registers (two blocks per SM on SM86),
+// so the fold has no headroom: emit one activation pair's worth of weights at a
+// time and let the MMAs retire them before decoding the rest.
+//
+// PHASE 0 takes the k+0 windows (w0/w1 for cols 0-7, w4/w5 for cols 8-15), which
+// pair with the activation half in a01. PHASE 1 takes the k+8 windows (w2/w3 and
+// w6/w7) and pairs with a23. glo drives cols 0-7, ghi cols 8-15.
+template <int cb, int PHASE>
+__device__ __forceinline__ void dq4_regs_4bits_tcfold
 (
-    uint32_t a,
+    uint32_t s,
     uint32_t b,
-    FragB& g0,
-    FragB& g1,
-    FragB& g2,
-    FragB& g3
+    FragB& glo,
+    FragB& ghi
 )
 {{
     static_assert(cb == 0, "tensor-core fold is 3inst (cb 0) only");
-    uint32_t s, w0, w1, w2, w3, w4, w5, w6, w7;
-    FSHF_IMM(s, b, a, 20);
-    w7 = b & 0xffff;
-    BFE16_IMM(w6, b, 4);
-    BFE16_IMM(w5, b, 8);
-    BFE16_IMM(w4, b, 12);
-    BFE16_IMM(w3, b, 16);
-    w2 = s & 0xffff;
-    BFE16_IMM(w1, s, 4);
-    BFE16_IMM(w0, s, 8);
-    g0[0] = cb0_fold_(w0);
-    g0[1] = cb0_fold_(w1);
-    g1[0] = cb0_fold_(w2);
-    g1[1] = cb0_fold_(w3);
-    g2[0] = cb0_fold_(w4);
-    g2[1] = cb0_fold_(w5);
-    g3[0] = cb0_fold_(w6);
-    g3[1] = cb0_fold_(w7);
+    static_assert(PHASE == 0 || PHASE == 1);
+    uint32_t v0, v1, v2, v3;
+    if constexpr (PHASE == 0)
+    {{
+        BFE16_IMM(v0, s, 8);    // w0
+        BFE16_IMM(v1, s, 4);    // w1
+        BFE16_IMM(v2, b, 12);   // w4
+        BFE16_IMM(v3, b, 8);    // w5
+    }}
+    else
+    {{
+        v0 = s & 0xffff;        // w2
+        BFE16_IMM(v1, b, 16);   // w3
+        BFE16_IMM(v2, b, 4);    // w6
+        v3 = b & 0xffff;        // w7
+    }}
+    glo[0] = cb0_fold_(v0);
+    glo[1] = cb0_fold_(v1);
+    ghi[0] = cb0_fold_(v2);
+    ghi[1] = cb0_fold_(v3);
 }}
 """
 
@@ -377,50 +382,28 @@ K4_TCFOLD_ASSERT_NEW = f"""MMODE == 0 && CFG == 0 && !SMEM_STAGE));
                   (bits == 4 && cb == 0 && !c_fp32 && MMODE == 0 &&
                    CFG == 0 && !SMEM_STAGE && K4_ARITH_MODE == 0));"""
 
-# Each real activation feeds two pseudo-k slots, so duplicate it once per
-# i-iteration and reuse it across the n-tiles.
-K4_TCFOLD_AFRAG_PATTERN = (
-    r"a01\[1\]\s*=\s*hzero;\s*\n(\s*)a23\[1\]\s*=\s*hzero;"
-)
-K4_TCFOLD_AFRAG_NEW = f"""a01[1] = hzero;
-\\g<1>a23[1] = hzero;
-
-\\g<1>// {K4_TCFOLD_KERNEL_MARKER}: a[2L], a[2L+1], a[2L+8], a[2L+9] duplicated
-\\g<1>// across the (lo, hi) pseudo-k pair each weight now occupies.
-\\g<1>[[maybe_unused]] FragB aq0, aq1, aq2, aq3;
-\\g<1>if constexpr (K4_TCFOLD)
-\\g<1>{{
-\\g<1>    aq0[0] = __low2half2(a01[0]);
-\\g<1>    aq1[0] = __high2half2(a01[0]);
-\\g<1>    aq2[0] = __low2half2(a23[0]);
-\\g<1>    aq3[0] = __high2half2(a23[0]);
-\\g<1>    aq0[1] = hzero;
-\\g<1>    aq1[1] = hzero;
-\\g<1>    aq2[1] = hzero;
-\\g<1>    aq3[1] = hzero;
-\\g<1>}}"""
-
 K4_TCFOLD_FRAG_DECL_PATTERN = r"\n(\s*)FragB\s+f0,\s*f1;"
-K4_TCFOLD_FRAG_DECL_NEW = (
-    "\n\\g<1>[[maybe_unused]] FragB f0, f1;"
-    "\n\\g<1>[[maybe_unused]] FragB g0, g1, g2, g3;"
-)
+K4_TCFOLD_FRAG_DECL_NEW = "\n\\g<1>[[maybe_unused]] FragB f0, f1;"
 
+# Skip the unfolded decode entirely; the fold does its own extraction next to
+# the MMAs so the intermediates die immediately.
 K4_TCFOLD_DECODE_PATTERN = (
     r"uint32_t aw = __shfl_sync\(0xffffffffu, bw\[t\], \(lane \+ 31\) & 31\);\s*\n"
     r"(\s*)exl3_gemv_ns::dq8_regs_4bits<cb([^>]*)>\(aw, bw\[t\], f0, f1\);"
 )
 K4_TCFOLD_DECODE_NEW = (
-    "uint32_t aw = __shfl_sync(0xffffffffu, bw[t], (lane + 31) & 31);\n"
-    "\\g<1>if constexpr (K4_TCFOLD)\n"
-    "\\g<1>    exl3_gemv_ns::dq8_regs_4bits_tcfold<cb>"
-    "(aw, bw[t], g0, g1, g2, g3);\n"
-    "\\g<1>else\n"
-    "\\g<1>    exl3_gemv_ns::dq8_regs_4bits<cb\\g<2>>(aw, bw[t], f0, f1);"
+    "if constexpr (!K4_TCFOLD)\n"
+    "\\g<1>{\n"
+    "\\g<1>    uint32_t aw =\n"
+    "\\g<1>        __shfl_sync(0xffffffffu, bw[t], (lane + 31) & 31);\n"
+    "\\g<1>    exl3_gemv_ns::dq8_regs_4bits<cb\\g<2>>(aw, bw[t], f0, f1);\n"
+    "\\g<1>}"
 )
 
-# ch[t][0] is n-cols 0-7 and ch[t][1] is 8-15; g0/g2 carry the k+0 window and
-# g1/g3 the k+8 window, so each accumulator still sums all 16 real k.
+# Two phases of two MMAs. Phase 0 takes the k+0 windows against a01, phase 1 the
+# k+8 windows against a23, so 32 pseudo-k still reduce to the same 16 real k.
+# Each phase is scoped: peak live state is one activation pair plus two weight
+# fragments, against the four-plus-eight the naive form held.
 K4_TCFOLD_MMA_PATTERN = (
     r"exl3_gemv_ns::mma_ab_h\(a01, a23, f0, ch\[t\]\[0\]\);\s*\n"
     r"(\s*)exl3_gemv_ns::mma_ab_h\(a01, a23, f1, ch\[t\]\[1\]\);"
@@ -429,16 +412,50 @@ K4_TCFOLD_MMA_NEW = (
     f"// {K4_TCFOLD_KERNEL_MARKER}: 4 MMAs over 32 pseudo-k, no half-sum ALU.\n"
     "\\g<1>if constexpr (K4_TCFOLD)\n"
     "\\g<1>{\n"
-    "\\g<1>    exl3_gemv_ns::mma_ab_h(aq0, aq1, g0, ch[t][0]);\n"
-    "\\g<1>    exl3_gemv_ns::mma_ab_h(aq2, aq3, g1, ch[t][0]);\n"
-    "\\g<1>    exl3_gemv_ns::mma_ab_h(aq0, aq1, g2, ch[t][1]);\n"
-    "\\g<1>    exl3_gemv_ns::mma_ab_h(aq2, aq3, g3, ch[t][1]);\n"
+    "\\g<1>    const uint32_t bwt = bw[t];\n"
+    "\\g<1>    const uint32_t awt =\n"
+    "\\g<1>        __shfl_sync(0xffffffffu, bwt, (lane + 31) & 31);\n"
+    "\\g<1>    uint32_t swt;\n"
+    "\\g<1>    FSHF_IMM(swt, bwt, awt, 20);\n"
+    "\\g<1>    {\n"
+    "\\g<1>        FragB ax, ay, glo, ghi;\n"
+    "\\g<1>        ax[0] = __low2half2(a01[0]);\n"
+    "\\g<1>        ay[0] = __high2half2(a01[0]);\n"
+    "\\g<1>        ax[1] = hzero;\n"
+    "\\g<1>        ay[1] = hzero;\n"
+    "\\g<1>        exl3_gemv_ns::dq4_regs_4bits_tcfold<cb, 0>"
+    "(swt, bwt, glo, ghi);\n"
+    "\\g<1>        exl3_gemv_ns::mma_ab_h(ax, ay, glo, ch[t][0]);\n"
+    "\\g<1>        exl3_gemv_ns::mma_ab_h(ax, ay, ghi, ch[t][1]);\n"
+    "\\g<1>    }\n"
+    "\\g<1>    {\n"
+    "\\g<1>        FragB ax, ay, glo, ghi;\n"
+    "\\g<1>        ax[0] = __low2half2(a23[0]);\n"
+    "\\g<1>        ay[0] = __high2half2(a23[0]);\n"
+    "\\g<1>        ax[1] = hzero;\n"
+    "\\g<1>        ay[1] = hzero;\n"
+    "\\g<1>        exl3_gemv_ns::dq4_regs_4bits_tcfold<cb, 1>"
+    "(swt, bwt, glo, ghi);\n"
+    "\\g<1>        exl3_gemv_ns::mma_ab_h(ax, ay, glo, ch[t][0]);\n"
+    "\\g<1>        exl3_gemv_ns::mma_ab_h(ax, ay, ghi, ch[t][1]);\n"
+    "\\g<1>    }\n"
     "\\g<1>}\n"
     "\\g<1>else\n"
     "\\g<1>{\n"
     "\\g<1>    exl3_gemv_ns::mma_ab_h(a01, a23, f0, ch[t][0]);\n"
     "\\g<1>    exl3_gemv_ns::mma_ab_h(a01, a23, f1, ch[t][1]);\n"
     "\\g<1>}"
+)
+
+# The control sits at exactly 64 registers. Tell ptxas the fold must keep two
+# blocks per SM so it trades ILP for registers instead of silently halving
+# occupancy. minBlocksPerMultiprocessor 1 is the default for every other
+# instance, so the control's codegen is unchanged.
+K4_TCFOLD_BOUNDS_PATTERN = (
+    r"__launch_bounds__\(CFG == 0 \? 512 : 256\)"
+)
+K4_TCFOLD_BOUNDS_NEW = (
+    "__launch_bounds__(CFG == 0 ? 512 : 256, K4_TCFOLD ? 2 : 1)"
 )
 
 K4_SLIM_KERNEL_MARKER = f"{MARKER}: K4 narrow-16 occupancy layout"
@@ -989,7 +1006,7 @@ def apply(src: Path) -> None:
         )
         for pattern, new in (
             (K4_TCFOLD_TEMPLATE_PATTERN, K4_TCFOLD_TEMPLATE_NEW),
-            (K4_TCFOLD_AFRAG_PATTERN, K4_TCFOLD_AFRAG_NEW),
+            (K4_TCFOLD_BOUNDS_PATTERN, K4_TCFOLD_BOUNDS_NEW),
             (K4_TCFOLD_FRAG_DECL_PATTERN, K4_TCFOLD_FRAG_DECL_NEW),
             (K4_TCFOLD_DECODE_PATTERN, K4_TCFOLD_DECODE_NEW),
             (K4_TCFOLD_MMA_PATTERN, K4_TCFOLD_MMA_NEW),

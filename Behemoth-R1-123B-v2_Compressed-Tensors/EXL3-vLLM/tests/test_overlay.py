@@ -46,13 +46,20 @@ def test_overlay_files_exist():
     assert "K4 cb0 tensor-core fold" in text
     assert "isolate the K4 tensor-core fold" in text
     assert "cb0_fold_" in text
-    assert "dq8_regs_4bits_tcfold" in text
+    assert "dq4_regs_4bits_tcfold" in text
     assert "bool K4_TCFOLD = false>" in text
     # The fold instance must stay isolated from every other configuration.
     assert "exl3_gemv_kernel<4, false, 0, 0, 0, false, 0, true>" in text
     assert "!k4_slim && !k4_arith_mode" in text
-    assert "mma_ab_h(aq0, aq1, g0, ch[t][0])" in text
-    assert "mma_ab_h(aq2, aq3, g3, ch[t][1])" in text
+    # Two scoped phases, so weight fragments die before the next pair decodes.
+    assert "dq4_regs_4bits_tcfold<cb, 0>" in text
+    assert "dq4_regs_4bits_tcfold<cb, 1>" in text
+    assert "mma_ab_h(ax, ay, glo, ch[t][0])" in text
+    assert "mma_ab_h(ax, ay, ghi, ch[t][1])" in text
+    assert "if constexpr (!K4_TCFOLD)" in text
+    # The control is at exactly 64 registers; ptxas must be told to hold two
+    # blocks rather than spending registers on ILP.
+    assert "K4_TCFOLD ? 2 : 1" in text
     assert "Do not hook decode_3inst" in text
     assert "exl3_lut_decode<cb>(x)" in text  # leftover-hook stripper only
 

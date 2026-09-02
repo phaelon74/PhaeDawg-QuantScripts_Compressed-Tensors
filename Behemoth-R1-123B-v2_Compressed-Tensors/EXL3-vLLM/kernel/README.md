@@ -36,6 +36,15 @@ What the overlay changes:
    `__high2half2`). Codebook ALU per 8 weights drops from 28 ops to 16, and the
    two `mma_ab_h` calls per n-tile become four over 32 pseudo-k. Exclusive with
    `EXL3_GEMV_K4_ARITH` and `EXL3_GEMV_K4_SLIM`; default dispatch is unchanged.
+
+   The control instance sits at exactly 64 registers, which is the two-block
+   boundary, so the fold has zero headroom. It therefore runs in two scoped
+   phases (k+0 windows against `a01`, k+8 against `a23`), keeping one activation
+   pair and two weight fragments live instead of four and eight, and carries
+   `__launch_bounds__(512, 2)` so ptxas trades ILP for registers rather than
+   silently halving occupancy. A first version that decoded all eight weights up
+   front measured 80 registers, 1 block/SM, and 15-18% slower than control on
+   every FFN shape.
 6. **16-bit codebook LUT fill** (`exl3_decode_lut.cu`): 65536 fp16 entries
    per codebook in global memory. Compiled but not invoked yet: without
    `-rdc`, nvcc treats `extern __constant__` as a per-translation-unit
@@ -88,7 +97,13 @@ holds at rtol 5e-2 / atol 0.75. `gate_proj` should move from ~970 to roughly
 register count: at 512 threads, 64 registers per thread is exactly two blocks
 in the 65536-register file, so 65 halves occupancy from 67% to 33%. The script
 fails only when the fold drops below the unfolded control's block count, since
-being over 64 costs nothing if the control is over it too.
+being over 64 costs nothing if the control is over it too. It also fails on any
+local-memory spill, because `__launch_bounds__(512, 2)` can always hit the
+register target by spilling, which costs more than the occupancy it buys.
+
+Confirm the control still reports `REG=64` after any launch-bounds change; that
+is the check that the fold's codegen constraint did not leak into the other
+instances.
 
 K4 arithmetic acceptance sequence on one RTX 3090:
 
