@@ -88,6 +88,17 @@ static bool exl3_gemv_k4_slim_enabled()
 }}
 """
 
+GEMV_K4_TCFOLD_HELPER = f"""
+// {MARKER}: K4 3inst tensor-core fold. The MMA is linear, so the codebook's
+// half-sum can be handed to the tensor core as two pseudo-k slots instead of
+// being packed on the SIMT pipe (PRMT x2 + HADD2 per pair).
+static bool exl3_gemv_k4_tcfold_enabled()
+{{
+    const char* env = std::getenv("EXL3_GEMV_K4_TCFOLD");
+    return env && atoi(env) > 0;
+}}
+"""
+
 GEMV_SM86_K4_POLICY = f"""
     // {MARKER}: measured RTX 3090 M=1 policy for Behemoth TP4 shapes.
     // Narrow GEMV wins for the large output projections; the regular kernel
@@ -119,6 +130,25 @@ static void* exl3_gemv_select_k4_slim()
     return (void*) exl3_gemv_kernel<4, false, 0, 0, 2, false>;
 }}
 """
+
+GEMV_K4_TCFOLD_SELECTOR = f"""
+// {MARKER}: isolated K4 tensor-core fold instance.
+static void* exl3_gemv_select_k4_tcfold()
+{{
+    return (void*) exl3_gemv_kernel<4, false, 0, 0, 0, false, 0, true>;
+}}
+"""
+
+# Applied after the arith chain so it works on a tree that already carries the
+# older overlay. Keyed on the selector name for idempotency.
+GEMV_K4_TCFOLD_SELECT_ANCHOR = (
+    "narrow_kernel = exl3_gemv_select_k4_arith(k4_arith_mode);"
+)
+GEMV_K4_TCFOLD_SELECT_NEW = f"""narrow_kernel = exl3_gemv_select_k4_arith(k4_arith_mode);
+    // {MARKER}: tensor-core fold is exclusive with slim and arith.
+    else if (K == 4 && cb == 0 && !c_fp32 && mmode == 0 && !smem &&
+             !k4_slim && !k4_arith_mode && exl3_gemv_k4_tcfold_enabled())
+        narrow_kernel = exl3_gemv_select_k4_tcfold();"""
 
 GEMV_K4_ARITH_SELECT_OLD = (
     "void* narrow_kernel = "
@@ -216,6 +246,56 @@ __device__ __forceinline__ void decode8_cb0_batched_(
 }}
 """
 
+K4_TCFOLD_KERNEL_MARKER = f"{MARKER}: K4 cb0 tensor-core fold"
+K4_TCFOLD_KERNEL_HELPERS = f"""
+// {K4_TCFOLD_KERNEL_MARKER}
+// decode_3inst_2<0> ends with __lows2half2 + __highs2half2 + __hadd2 to
+// materialize lo+hi on the SIMT pipe. The MMA is linear over k, so leaving the
+// pair packed and giving it two pseudo-k slots costs no ALU at all.
+__device__ __forceinline__ half2 cb0_fold_(uint32_t x)
+{{
+    x = x * 89226354u + 64248484u;
+    asm ("lop3.b32 %0, %0, 0x8fff8fff, 0x3b603b60, 0x6a;" : "+r"(x));
+    half2_uint32 xu(x);
+    return xu.as_half2;
+}}
+
+// Same window order as dq8_regs_4bits, but each weight stays a (lo, hi) pair.
+// g0/g1 are the low n-half (cols 0-7), g2/g3 the high n-half, and within each
+// pair the second register carries the k+8 window.
+template <int cb>
+__device__ __forceinline__ void dq8_regs_4bits_tcfold
+(
+    uint32_t a,
+    uint32_t b,
+    FragB& g0,
+    FragB& g1,
+    FragB& g2,
+    FragB& g3
+)
+{{
+    static_assert(cb == 0, "tensor-core fold is 3inst (cb 0) only");
+    uint32_t s, w0, w1, w2, w3, w4, w5, w6, w7;
+    FSHF_IMM(s, b, a, 20);
+    w7 = b & 0xffff;
+    BFE16_IMM(w6, b, 4);
+    BFE16_IMM(w5, b, 8);
+    BFE16_IMM(w4, b, 12);
+    BFE16_IMM(w3, b, 16);
+    w2 = s & 0xffff;
+    BFE16_IMM(w1, s, 4);
+    BFE16_IMM(w0, s, 8);
+    g0[0] = cb0_fold_(w0);
+    g0[1] = cb0_fold_(w1);
+    g1[0] = cb0_fold_(w2);
+    g1[1] = cb0_fold_(w3);
+    g2[0] = cb0_fold_(w4);
+    g2[1] = cb0_fold_(w5);
+    g3[0] = cb0_fold_(w6);
+    g3[1] = cb0_fold_(w7);
+}}
+"""
+
 K4_DECODE8_TEMPLATE_OLD = """template <int cb>
 __device__ __forceinline__ void decode8"""
 K4_DECODE8_TEMPLATE_NEW = """template <int cb, int K4_ARITH_MODE = 0>
@@ -279,6 +359,86 @@ K4_KERNEL_DQ_CALL_OLD = (
 )
 K4_KERNEL_DQ_CALL_NEW = (
     "exl3_gemv_ns::dq8_regs_4bits<cb, K4_ARITH_MODE>("
+)
+
+K4_TCFOLD_ASSERT_MARKER = f"{MARKER}: isolate the K4 tensor-core fold"
+# decode8 and dq8_regs_4bits carry K4_ARITH_MODE too, so anchor on SMEM_STAGE
+# to hit only the kernel template.
+K4_TCFOLD_TEMPLATE_PATTERN = (
+    r"bool\s+SMEM_STAGE,\s*int\s+K4_ARITH_MODE\s*=\s*0>"
+)
+K4_TCFOLD_TEMPLATE_NEW = (
+    "bool SMEM_STAGE, int K4_ARITH_MODE = 0, bool K4_TCFOLD = false>"
+)
+K4_TCFOLD_ASSERT_ANCHOR = "MMODE == 0 && CFG == 0 && !SMEM_STAGE));"
+K4_TCFOLD_ASSERT_NEW = f"""MMODE == 0 && CFG == 0 && !SMEM_STAGE));
+    // {K4_TCFOLD_ASSERT_MARKER}.
+    static_assert(!K4_TCFOLD ||
+                  (bits == 4 && cb == 0 && !c_fp32 && MMODE == 0 &&
+                   CFG == 0 && !SMEM_STAGE && K4_ARITH_MODE == 0));"""
+
+# Each real activation feeds two pseudo-k slots, so duplicate it once per
+# i-iteration and reuse it across the n-tiles.
+K4_TCFOLD_AFRAG_PATTERN = (
+    r"a01\[1\]\s*=\s*hzero;\s*\n(\s*)a23\[1\]\s*=\s*hzero;"
+)
+K4_TCFOLD_AFRAG_NEW = f"""a01[1] = hzero;
+\\g<1>a23[1] = hzero;
+
+\\g<1>// {K4_TCFOLD_KERNEL_MARKER}: a[2L], a[2L+1], a[2L+8], a[2L+9] duplicated
+\\g<1>// across the (lo, hi) pseudo-k pair each weight now occupies.
+\\g<1>[[maybe_unused]] FragB aq0, aq1, aq2, aq3;
+\\g<1>if constexpr (K4_TCFOLD)
+\\g<1>{{
+\\g<1>    aq0[0] = __low2half2(a01[0]);
+\\g<1>    aq1[0] = __high2half2(a01[0]);
+\\g<1>    aq2[0] = __low2half2(a23[0]);
+\\g<1>    aq3[0] = __high2half2(a23[0]);
+\\g<1>    aq0[1] = hzero;
+\\g<1>    aq1[1] = hzero;
+\\g<1>    aq2[1] = hzero;
+\\g<1>    aq3[1] = hzero;
+\\g<1>}}"""
+
+K4_TCFOLD_FRAG_DECL_PATTERN = r"\n(\s*)FragB\s+f0,\s*f1;"
+K4_TCFOLD_FRAG_DECL_NEW = (
+    "\n\\g<1>[[maybe_unused]] FragB f0, f1;"
+    "\n\\g<1>[[maybe_unused]] FragB g0, g1, g2, g3;"
+)
+
+K4_TCFOLD_DECODE_PATTERN = (
+    r"uint32_t aw = __shfl_sync\(0xffffffffu, bw\[t\], \(lane \+ 31\) & 31\);\s*\n"
+    r"(\s*)exl3_gemv_ns::dq8_regs_4bits<cb([^>]*)>\(aw, bw\[t\], f0, f1\);"
+)
+K4_TCFOLD_DECODE_NEW = (
+    "uint32_t aw = __shfl_sync(0xffffffffu, bw[t], (lane + 31) & 31);\n"
+    "\\g<1>if constexpr (K4_TCFOLD)\n"
+    "\\g<1>    exl3_gemv_ns::dq8_regs_4bits_tcfold<cb>"
+    "(aw, bw[t], g0, g1, g2, g3);\n"
+    "\\g<1>else\n"
+    "\\g<1>    exl3_gemv_ns::dq8_regs_4bits<cb\\g<2>>(aw, bw[t], f0, f1);"
+)
+
+# ch[t][0] is n-cols 0-7 and ch[t][1] is 8-15; g0/g2 carry the k+0 window and
+# g1/g3 the k+8 window, so each accumulator still sums all 16 real k.
+K4_TCFOLD_MMA_PATTERN = (
+    r"exl3_gemv_ns::mma_ab_h\(a01, a23, f0, ch\[t\]\[0\]\);\s*\n"
+    r"(\s*)exl3_gemv_ns::mma_ab_h\(a01, a23, f1, ch\[t\]\[1\]\);"
+)
+K4_TCFOLD_MMA_NEW = (
+    f"// {K4_TCFOLD_KERNEL_MARKER}: 4 MMAs over 32 pseudo-k, no half-sum ALU.\n"
+    "\\g<1>if constexpr (K4_TCFOLD)\n"
+    "\\g<1>{\n"
+    "\\g<1>    exl3_gemv_ns::mma_ab_h(aq0, aq1, g0, ch[t][0]);\n"
+    "\\g<1>    exl3_gemv_ns::mma_ab_h(aq2, aq3, g1, ch[t][0]);\n"
+    "\\g<1>    exl3_gemv_ns::mma_ab_h(aq0, aq1, g2, ch[t][1]);\n"
+    "\\g<1>    exl3_gemv_ns::mma_ab_h(aq2, aq3, g3, ch[t][1]);\n"
+    "\\g<1>}\n"
+    "\\g<1>else\n"
+    "\\g<1>{\n"
+    "\\g<1>    exl3_gemv_ns::mma_ab_h(a01, a23, f0, ch[t][0]);\n"
+    "\\g<1>    exl3_gemv_ns::mma_ab_h(a01, a23, f1, ch[t][1]);\n"
+    "\\g<1>}"
 )
 
 K4_SLIM_KERNEL_MARKER = f"{MARKER}: K4 narrow-16 occupancy layout"
@@ -530,6 +690,13 @@ def apply(src: Path) -> None:
         text = text.replace(
             needle, GEMV_K4_SLIM_HELPER + "\n" + needle, 1
         )
+    if "exl3_gemv_k4_tcfold_enabled" not in text:
+        needle = "static int exl3_gemv_env_mode()"
+        if needle not in text:
+            raise SystemExit(f"{gemv}: missing exl3_gemv_env_mode")
+        text = text.replace(
+            needle, GEMV_K4_TCFOLD_HELPER + "\n" + needle, 1
+        )
     text = text.replace(
         "!exl3_gemv_allow_k56()", "exl3_gemv_k56_mode() == 0"
     )
@@ -649,6 +816,19 @@ def apply(src: Path) -> None:
             text,
             GEMV_K4_ARITH_SELECT_OLD,
             GEMV_K4_ARITH_SELECT_NEW,
+            gemv,
+        )
+    if "exl3_gemv_select_k4_tcfold" not in text:
+        needle = "bool exl3_gemv_try_launch"
+        if needle not in text:
+            raise SystemExit(f"{gemv}: GEMV launch function not found")
+        text = text.replace(
+            needle, GEMV_K4_TCFOLD_SELECTOR + "\n" + needle, 1
+        )
+        text = _replace_once(
+            text,
+            GEMV_K4_TCFOLD_SELECT_ANCHOR,
+            GEMV_K4_TCFOLD_SELECT_NEW,
             gemv,
         )
     if "slim uses 256 threads and 16 columns" not in text:
@@ -798,6 +978,30 @@ def apply(src: Path) -> None:
             kernel_text,
             K4_SLIM_FOLD_PATTERN,
             K4_SLIM_FOLD_NEW,
+            gemv_kernel,
+        )
+    if K4_TCFOLD_KERNEL_MARKER not in kernel_text:
+        needle = "}  // namespace exl3_gemv_ns"
+        if needle not in kernel_text:
+            raise SystemExit(f"{gemv_kernel}: GEMV namespace end not found")
+        kernel_text = kernel_text.replace(
+            needle, K4_TCFOLD_KERNEL_HELPERS + "\n" + needle, 1
+        )
+        for pattern, new in (
+            (K4_TCFOLD_TEMPLATE_PATTERN, K4_TCFOLD_TEMPLATE_NEW),
+            (K4_TCFOLD_AFRAG_PATTERN, K4_TCFOLD_AFRAG_NEW),
+            (K4_TCFOLD_FRAG_DECL_PATTERN, K4_TCFOLD_FRAG_DECL_NEW),
+            (K4_TCFOLD_DECODE_PATTERN, K4_TCFOLD_DECODE_NEW),
+            (K4_TCFOLD_MMA_PATTERN, K4_TCFOLD_MMA_NEW),
+        ):
+            kernel_text = _replace_regex_once(
+                kernel_text, pattern, new, gemv_kernel
+            )
+    if K4_TCFOLD_ASSERT_MARKER not in kernel_text:
+        kernel_text = _replace_once(
+            kernel_text,
+            K4_TCFOLD_ASSERT_ANCHOR,
+            K4_TCFOLD_ASSERT_NEW,
             gemv_kernel,
         )
     gemv_kernel.write_text(kernel_text, encoding="utf-8")

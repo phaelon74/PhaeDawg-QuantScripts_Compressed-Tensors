@@ -175,6 +175,57 @@ def test_k4_slim_gemv_matches_reconstruct(monkeypatch):
         pytest.fail(f"K4 slim parity failed: max_err={max_err}")
 
 
+def test_k4_tcfold_gemv_matches_reconstruct(monkeypatch):
+    monkeypatch.setenv("EXL3_GEMV_K4_TCFOLD", "1")
+    monkeypatch.delenv("EXL3_GEMV_K4_ARITH", raising=False)
+    monkeypatch.delenv("EXL3_GEMV_K4_SLIM", raising=False)
+    monkeypatch.setenv("VLLM_EXL3_FORCE_COMPRESSED", "1")
+    monkeypatch.delenv("VLLM_EXL3_FORCE_RECONSTRUCT", raising=False)
+    ext = _ext()
+    from vllm_exl3_sm86.ops import call_exl3_gemm
+
+    device = torch.device("cuda")
+    x, trellis, suh, svh = _payloads(4, 1, torch.float16, device)
+    got = call_exl3_gemm(
+        x, trellis, suh, svh, mcg=False, mul1=False
+    )
+    ref = _reconstruct_ref(
+        ext,
+        x,
+        trellis,
+        suh,
+        svh,
+        4,
+        mcg=False,
+        mul1=False,
+    )
+    torch.cuda.synchronize()
+    # The fold replaces a*(lo+hi) with a*lo + a*hi, so the fp16 accumulator
+    # takes twice as many terms per k-slice before the fp32 fold.
+    if not torch.allclose(got, ref, rtol=5e-2, atol=0.75):
+        max_err = (got.float() - ref.float()).abs().max().item()
+        pytest.fail(f"K4 tensor-core fold parity failed: max_err={max_err}")
+
+
+def test_k4_tcfold_is_opt_in(monkeypatch):
+    """Default dispatch must be byte-identical to the unfolded kernel."""
+    monkeypatch.delenv("EXL3_GEMV_K4_TCFOLD", raising=False)
+    monkeypatch.delenv("EXL3_GEMV_K4_ARITH", raising=False)
+    monkeypatch.delenv("EXL3_GEMV_K4_SLIM", raising=False)
+    monkeypatch.setenv("VLLM_EXL3_FORCE_COMPRESSED", "1")
+    ext = _ext()
+    from vllm_exl3_sm86.ops import call_exl3_gemm
+
+    device = torch.device("cuda")
+    x, trellis, suh, svh = _payloads(4, 1, torch.float16, device)
+    got = call_exl3_gemm(x, trellis, suh, svh, mcg=False, mul1=False)
+    ref = _native_compressed(ext, x, trellis, suh, svh, False, False)
+    torch.cuda.synchronize()
+    if not torch.equal(got, ref):
+        max_err = (got.float() - ref.float()).abs().max().item()
+        pytest.fail(f"unfolded K4 default drifted: max_err={max_err}")
+
+
 @pytest.mark.parametrize("bitrate", [1, 2, 3, 4, 5, 6, 7, 8])
 @pytest.mark.parametrize("mcg,mul1", [(False, False), (True, False), (False, True)])
 def test_plugin_compressed_matches_ext_gemm_all_codebooks(bitrate, mcg, mul1, monkeypatch):
