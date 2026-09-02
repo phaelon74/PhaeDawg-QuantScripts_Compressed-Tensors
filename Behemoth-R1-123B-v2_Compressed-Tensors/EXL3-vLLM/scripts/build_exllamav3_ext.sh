@@ -54,10 +54,22 @@ else
 fi
 
 mkdir -p "$OUT"
-python3 - <<'PY'
+EXLLAMAV3_SRC_TREE="$SRC" python3 - <<'PY'
 import os
 import pathlib
 import shutil
+import sys
+
+dst_dir = pathlib.Path(os.environ["EXLLAMAV3_EXT_OUT"]).resolve()
+src_root = pathlib.Path(os.environ["EXLLAMAV3_SRC_TREE"]).resolve()
+dst_dir.mkdir(parents=True, exist_ok=True)
+
+# env.sh puts EXLLAMAV3_EXT_OUT on PYTHONPATH for serving. Importing from there
+# would resolve to the previous build and copy the stale binary over itself.
+sys.path = [
+    p for p in sys.path
+    if not p or pathlib.Path(p).resolve() != dst_dir
+]
 
 import torch  # load libc10 / libtorch before the extension
 
@@ -69,12 +81,26 @@ os.environ["LD_LIBRARY_PATH"] = str(torch_lib) + (
 import exllamav3_ext
 
 src = pathlib.Path(exllamav3_ext.__file__).resolve()
-dst_dir = pathlib.Path(os.environ["EXLLAMAV3_EXT_OUT"])
-dst_dir.mkdir(parents=True, exist_ok=True)
+if src.parent == dst_dir:
+    # Still resolved to the output dir; take the newest build under the tree.
+    found = [
+        p.resolve() for p in src_root.rglob("exllamav3_ext*.so")
+        if p.resolve().parent != dst_dir
+    ]
+    if not found:
+        raise SystemExit(
+            f"import resolved to {dst_dir} and no exllamav3_ext*.so under {src_root}"
+        )
+    src = max(found, key=lambda p: p.stat().st_mtime)
+    print("import resolved to the output dir; using", src)
+
 copied = 0
-for path in src.parent.glob("exllamav3_ext*"):
-    shutil.copy2(path, dst_dir / path.name)
-    print("copied", path, "->", dst_dir / path.name)
+for path in sorted(src.parent.glob("exllamav3_ext*")):
+    dst = dst_dir / path.name
+    if dst.exists() and path.samefile(dst):
+        raise SystemExit(f"refusing to copy {path} onto itself")
+    shutil.copy2(path, dst)
+    print("copied", path, "->", dst)
     copied += 1
 if copied == 0:
     raise SystemExit(f"no exllamav3_ext* next to {src}")

@@ -32,6 +32,14 @@ command -v cuobjdump >/dev/null 2>&1 || {
 echo "binary: $SO"
 echo "limit:  $LIMIT registers/thread"
 
+# Distinguish "overlay missing from this binary" from "instance not emitted".
+if ! grep -qa 'EXL3_GEMV_K4_TCFOLD' "$SO"; then
+  echo "" >&2
+  echo "this binary has no EXL3_GEMV_K4_TCFOLD literal: it predates the fold." >&2
+  echo "the build's copy step likely failed, so $SO is the previous build." >&2
+  exit 1
+fi
+
 DUMP="$(mktemp)"
 trap 'rm -f "$DUMP"' EXIT
 cuobjdump -res-usage "$SO" > "$DUMP"

@@ -29,6 +29,26 @@ def _ext():
         pytest.skip(str(exc))
 
 
+def _ext_has_env_flag(flag: str) -> bool:
+    """True when the loaded extension actually reads this env var.
+
+    An overlay flag that is missing from the binary is silently ignored at
+    runtime, which turns an opt-in kernel test into a re-test of the default
+    path. Look for the getenv string literal instead of trusting the build.
+    """
+    import mmap
+    import pathlib
+    import sys
+
+    module = sys.modules.get("exllamav3_ext")
+    path = getattr(module, "__file__", None)
+    if not path:
+        return False
+    with pathlib.Path(path).open("rb") as fh:
+        with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            return data.find(flag.encode()) != -1
+
+
 def _payloads(bitrate: int, m: int, dtype: torch.dtype, device: torch.device, seed: int = 0):
     k, n = 256, 256
     torch.manual_seed(seed)
@@ -182,6 +202,11 @@ def test_k4_tcfold_gemv_matches_reconstruct(monkeypatch):
     monkeypatch.setenv("VLLM_EXL3_FORCE_COMPRESSED", "1")
     monkeypatch.delenv("VLLM_EXL3_FORCE_RECONSTRUCT", raising=False)
     ext = _ext()
+    if not _ext_has_env_flag("EXL3_GEMV_K4_TCFOLD"):
+        pytest.skip(
+            "loaded exllamav3_ext predates the tensor-core fold; rebuild and "
+            "confirm the new .so landed in VLLM_EXL3_EXT_PATH"
+        )
     from vllm_exl3_sm86.ops import call_exl3_gemm
 
     device = torch.device("cuda")
