@@ -80,11 +80,15 @@ for mode in 0 1; do
 done
 ```
 
-Accept only if every one of `o/gate/up/down` beats the mode 0 control, parity
-holds at rtol 5e-2 / atol 0.75, and the fold instance is at or below 64
-registers with no local-memory spill. `gate_proj` should move from ~970 to
-roughly 1300 G w/s; anything under ~1100 means the register budget blew and
-occupancy dropped.
+Accept only if every one of `o/gate/up/down` beats the mode 0 control and parity
+holds at rtol 5e-2 / atol 0.75. `gate_proj` should move from ~970 to roughly
+1300 G w/s.
+
+`check_tcfold_registers.sh` gates on resident blocks per SM, not on a flat
+register count: at 512 threads, 64 registers per thread is exactly two blocks
+in the 65536-register file, so 65 halves occupancy from 67% to 33%. The script
+fails only when the fold drops below the unfolded control's block count, since
+being over 64 costs nothing if the control is over it too.
 
 K4 arithmetic acceptance sequence on one RTX 3090:
 

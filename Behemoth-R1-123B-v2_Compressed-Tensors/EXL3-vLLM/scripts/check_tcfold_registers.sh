@@ -60,9 +60,10 @@ text = open(dump_path, encoding="utf-8", errors="replace").read()
 entries = []
 current = None
 for line in text.splitlines():
-    m = re.search(r"Function\s+(\S+)", line)
+    m = re.search(r"Function\s*:?\s*(\S+)", line)
     if m:
-        current = m.group(1)
+        # cuobjdump writes "Function <mangled>:" with a trailing colon.
+        current = m.group(1).rstrip(":")
         continue
     m = re.search(r"\bREG:(\d+)", line)
     if m and current:
@@ -73,6 +74,14 @@ gemv = [(s, r) for s, r in entries if "exl3_gemv_kernel" in s]
 if not gemv:
     print("no exl3_gemv_kernel instances in the binary", file=sys.stderr)
     raise SystemExit(2)
+
+
+# SM86: 65536 registers per SM, allocated per warp in units of 8 per thread.
+def blocks_per_sm(regs: int, threads: int) -> int:
+    warps = threads // 32
+    per_warp = -(-regs // 8) * 8 * 32
+    by_regs = 65536 // (per_warp * warps) if per_warp else 16
+    return max(0, min(by_regs, 1536 // threads, 16))
 
 try:
     demangled = subprocess.run(
@@ -85,41 +94,70 @@ try:
 except (OSError, subprocess.CalledProcessError):
     demangled = [s for s, _ in gemv]
 
-fold = []
-other = []
+ARGS = re.compile(r"exl3_gemv_kernel<([^>]*)>")
+fold = None
+control = None
+rows = []
 for (sym, regs), name in zip(gemv, demangled):
-    row = (name, regs)
-    # The fold is the only instance whose last template argument is true.
-    if re.search(r"false,\s*0,\s*true>", name) or "0, true>" in name:
-        fold.append(row)
-    else:
-        other.append(row)
+    m = ARGS.search(name)
+    if not m:
+        continue
+    args = [a.strip() for a in m.group(1).split(",")]
+    if len(args) < 8:
+        args += ["0", "false"][len(args) - 6:]
+    bits, c_fp32, cb, mmode, cfg, smem, arith, tcfold = args[:8]
+    # The fold only ever runs on the K4 / cb0 / fp16 / M=1 / CFG0 hotspot.
+    if (bits, c_fp32, cb, mmode, cfg, smem) != ("4", "false", "0", "0", "0", "false"):
+        continue
+    threads = 512
+    row = (regs, threads, blocks_per_sm(regs, threads), arith, tcfold)
+    rows.append(row)
+    if tcfold == "true":
+        fold = row
+    elif arith == "0":
+        control = row
 
 print(f"{len(gemv)} exl3_gemv_kernel instances")
-worst_other = max((r for _, r in other), default=0)
-print(f"max registers, non-fold instances: {worst_other}")
+print("K4 / cb0 / fp16 / M=1 / CFG0 instances (512 threads):")
+for regs, threads, blocks, arith, tcfold in sorted(rows):
+    tag = "fold" if tcfold == "true" else (
+        "control" if arith == "0" else f"arith{arith}"
+    )
+    warps = blocks * threads // 32
+    print(
+        f"  {tag:<8} REG={regs:3d}  blocks/SM={blocks}  "
+        f"occupancy={warps / 48:.0%}"
+    )
 
-if not fold:
+if fold is None:
     print(
         "fold instance not in the binary: rebuild with the overlay applied",
         file=sys.stderr,
     )
     raise SystemExit(1)
 
-bad = 0
-for name, regs in sorted(fold, key=lambda r: -r[1]):
-    status = "OK" if regs <= limit else "OVER"
-    if regs > limit:
-        bad += 1
-    print(f"[{status}] REG={regs:3d}  {name}")
+fold_regs, _, fold_blocks = fold[0], fold[1], fold[2]
+if control is None:
+    print("no unfolded control instance to compare against", file=sys.stderr)
+    raise SystemExit(1)
+ctrl_regs, _, ctrl_blocks = control[0], control[1], control[2]
 
-if bad:
+print(f"control {ctrl_regs} regs / {ctrl_blocks} blocks, "
+      f"fold {fold_regs} regs / {fold_blocks} blocks")
+if fold_blocks < ctrl_blocks:
     print(
-        f"fold exceeds {limit} registers: occupancy will drop to 1 block/SM",
+        f"fold loses occupancy ({ctrl_blocks} -> {fold_blocks} blocks/SM); "
+        f"it needs to fit in {limit} registers to keep {ctrl_blocks} blocks",
         file=sys.stderr,
     )
     raise SystemExit(1)
-print("fold is within the register budget")
+if fold_regs > limit:
+    print(
+        f"fold is over {limit} registers but the control is too, "
+        "so occupancy is unchanged: benchmark it"
+    )
+else:
+    print("fold is within the register budget")
 PY
 }
 
